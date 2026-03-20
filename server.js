@@ -281,6 +281,428 @@ app.post('/api/chats/:chatId/read', auth, async function(req, res) {
   res.json({ ok: true });
 });
 
+// ═══ ADMIN ═══
+const ADMIN_KEY = process.env.ADMIN_KEY || 'lumiq_admin_2024';
+
+function adminAuth(req, res, next) {
+  if (req.headers['x-admin-key'] !== ADMIN_KEY) return res.status(401).json({ error: 'غير مصرح' });
+  next();
+}
+
+
+const ADMIN_HTML = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>LUMIQ Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0f172a;--card:#1e293b;--card2:#334155;--blue:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--text:#f1f5f9;--sub:#94a3b8;--border:#334155;--r:12px}
+body{font-family:Tahoma,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:var(--card2);border-radius:3px}
+input,textarea,button,select{font-family:inherit}
+.login{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.lbox{background:var(--card);border-radius:20px;padding:36px;width:100%;max-width:360px;border:1px solid var(--border)}
+.llogo{text-align:center;margin-bottom:24px}
+.llogo h1{font-size:26px;font-weight:900;color:var(--blue)}
+.llogo p{font-size:13px;color:var(--sub);margin-top:3px}
+.fi{width:100%;padding:11px 13px;background:var(--bg);border:1.5px solid var(--border);border-radius:10px;font-size:14px;color:var(--text);margin-bottom:10px}
+.fi:focus{border-color:var(--blue);outline:none}
+.fi::placeholder{color:var(--sub)}
+.btn{padding:11px 18px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;border:none;transition:opacity .2s}
+.btn:hover{opacity:.85}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-blue{background:var(--blue);color:#fff;width:100%}
+.btn-red{background:var(--red);color:#fff}
+.btn-green{background:var(--green);color:#fff}
+.btn-yellow{background:var(--yellow);color:#000}
+.btn-gray{background:var(--card2);color:var(--text)}
+.btn-sm{padding:5px 12px;font-size:12px;border-radius:7px}
+.err{color:var(--red);font-size:13px;margin-bottom:8px;background:rgba(239,68,68,.1);padding:9px 12px;border-radius:8px;display:none}
+.err.on{display:block}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:220px;background:var(--card);border-left:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;right:0;bottom:0}
+.slogo{padding:18px 14px 12px;border-bottom:1px solid var(--border)}
+.slogo h2{font-size:17px;font-weight:800;color:var(--blue)}
+.nav{display:flex;flex-direction:column;padding:6px 0;flex:1}
+.ni{display:flex;align-items:center;gap:9px;padding:10px 14px;cursor:pointer;color:var(--sub);font-size:13px;font-weight:500;border-right:3px solid transparent;transition:all .2s}
+.ni:hover{background:rgba(255,255,255,.04);color:var(--text)}
+.ni.on{color:var(--blue);background:rgba(59,130,246,.08);border-right-color:var(--blue)}
+.ni svg{width:16px;height:16px;flex-shrink:0}
+.sfooter{padding:12px 14px;border-top:1px solid var(--border)}
+.content{margin-right:220px;flex:1;padding:20px}
+.ph{margin-bottom:18px}
+.ph h1{font-size:20px;font-weight:800}
+.ph p{font-size:12px;color:var(--sub);margin-top:2px}
+.sgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.sc{background:var(--card);border-radius:12px;padding:16px;border:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.si{width:40px;height:40px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.sv{font-size:22px;font-weight:800}
+.sl{font-size:12px;color:var(--sub);margin-top:1px}
+.box{background:var(--card);border-radius:12px;border:1px solid var(--border);overflow:hidden;margin-bottom:14px}
+.bh{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.bh h3{font-size:14px;font-weight:700}
+.sb{display:flex;align-items:center;gap:7px;background:var(--bg);border:1.5px solid var(--border);border-radius:8px;padding:6px 10px}
+.sb input{background:none;border:none;color:var(--text);font-size:13px;width:160px;outline:none}
+.sb input::placeholder{color:var(--sub)}
+table{width:100%;border-collapse:collapse}
+th{padding:10px 12px;text-align:right;font-size:11px;font-weight:600;color:var(--sub);border-bottom:1px solid var(--border);background:rgba(255,255,255,.02)}
+td{padding:10px 12px;font-size:13px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+.badge{display:inline-flex;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+.bg-green{background:rgba(34,197,94,.15);color:var(--green)}
+.bg-red{background:rgba(239,68,68,.15);color:var(--red)}
+.bg-blue{background:rgba(59,130,246,.15);color:var(--blue)}
+.bg-gray{background:rgba(148,163,184,.15);color:var(--sub)}
+.bg-yellow{background:rgba(245,158,11,.15);color:var(--yellow)}
+.uc{display:flex;align-items:center;gap:8px}
+.ua{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;flex-shrink:0;overflow:hidden}
+.ua img{width:100%;height:100%;object-fit:cover}
+.un{font-weight:600;font-size:13px}
+.us{font-size:11px;color:var(--sub)}
+.acts{display:flex;gap:4px;flex-wrap:wrap}
+.idb{font-size:11px;color:var(--sub);font-family:monospace;background:var(--bg);padding:2px 5px;border-radius:4px}
+.pager{display:flex;align-items:center;gap:8px;padding:12px 14px;border-top:1px solid var(--border)}
+.pinfo{font-size:12px;color:var(--sub);flex:1}
+.igrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;padding:12px}
+.icard{background:var(--card2);border-radius:9px;overflow:hidden;border:1px solid var(--border)}
+.icard img{width:100%;height:110px;object-fit:cover;cursor:pointer;display:block}
+.icardinfo{padding:6px 9px}
+.isender{font-size:12px;font-weight:600}
+.itime{font-size:10px;color:var(--sub);margin-top:1px}
+.idel{width:100%;padding:4px;background:rgba(239,68,68,.1);color:var(--red);border:none;cursor:pointer;font-size:11px;border-radius:5px;margin-top:4px}
+.viewer{position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:999;display:flex;align-items:center;justify-content:center;display:none}
+.viewer img{max-width:92%;max-height:92%;border-radius:8px}
+.vx{position:absolute;top:16px;right:16px;width:40px;height:40px;background:rgba(255,255,255,.1);border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:20px;color:#fff}
+.bcast{background:var(--card);border-radius:12px;border:1px solid var(--border);padding:20px;margin-bottom:14px}
+.bcast h3{font-size:14px;font-weight:700;margin-bottom:12px}
+.ig{margin-bottom:10px}
+.ig label{font-size:12px;color:var(--sub);display:block;margin-bottom:4px}
+.if{width:100%;padding:9px 11px;background:var(--bg);border:1.5px solid var(--border);border-radius:9px;font-size:13px;color:var(--text)}
+.if:focus{border-color:var(--blue);outline:none}
+textarea.if{resize:vertical;min-height:80px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:500;display:flex;align-items:center;justify-content:center;display:none;padding:20px}
+.mbox{background:var(--card);border-radius:14px;padding:22px;width:100%;max-width:400px;border:1px solid var(--border)}
+.mbox h3{font-size:16px;font-weight:700;margin-bottom:10px}
+.macts{display:flex;gap:9px;margin-top:14px}
+.toast{position:fixed;bottom:18px;left:18px;background:var(--card2);color:var(--text);padding:10px 16px;border-radius:9px;font-size:13px;font-weight:600;z-index:900;opacity:0;transition:all .3s;pointer-events:none;border:1px solid var(--border)}
+.toast.on{opacity:1}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;color:var(--sub);text-align:center}
+.empty h3{font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px}
+.lw{display:flex;align-items:center;justify-content:center;padding:40px;color:var(--sub)}
+.spin{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite;margin-left:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast"></div>
+
+<div class="viewer" id="viewer">
+  <img id="vimg" src="" alt=""/>
+  <div class="vx" onclick="closeViewer()">✕</div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="mbox">
+    <h3 id="mttl"></h3>
+    <div id="mbody" style="color:var(--sub);font-size:13px;line-height:1.6"></div>
+    <div class="macts">
+      <button class="btn btn-gray btn-sm" onclick="closeModal()">إلغاء</button>
+      <button class="btn btn-red btn-sm" id="mok">تأكيد</button>
+    </div>
+  </div>
+</div>
+
+<div id="login" class="login">
+  <div class="lbox">
+    <div class="llogo"><h1>⚙️ LUMIQ</h1><p>لوحة تحكم المشرف</p></div>
+    <div class="err" id="lerr"></div>
+    <input class="fi" type="password" id="akey" placeholder="مفتاح المشرف..." autocomplete="off"/>
+    <button class="btn btn-blue" id="lbtn" onclick="doLogin()">دخول</button>
+  </div>
+</div>
+
+<div id="dash" class="layout" style="display:none">
+  <div class="sidebar">
+    <div class="slogo"><h2>⚙️ LUMIQ Admin</h2></div>
+    <div class="nav">
+      <div class="ni on" data-p="stats" onclick="go('stats')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>الإحصائيات</div>
+      <div class="ni" data-p="users" onclick="go('users')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>المستخدمون</div>
+      <div class="ni" data-p="messages" onclick="go('messages')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>الرسائل</div>
+      <div class="ni" data-p="images" onclick="go('images')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>الصور</div>
+      <div class="ni" data-p="broadcast" onclick="go('broadcast')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>الإشعارات</div>
+    </div>
+    <div class="sfooter"><button class="btn btn-gray btn-sm" style="width:100%" onclick="doLogout()">خروج</button></div>
+  </div>
+  <div class="content" id="content"></div>
+</div>
+
+<script>
+var KEY = '';
+var mcb = null;
+
+function G(id){return document.getElementById(id);}
+function ini(n){return n?n.trim()[0].toUpperCase():'?';}
+function fd(ts){if(!ts)return'';var d=new Date(ts);return d.toLocaleDateString('ar',{year:'numeric',month:'short',day:'numeric'});}
+
+function toast(msg,t){var e=G('toast');e.textContent=msg;e.style.borderColor=t==='ok'?'var(--green)':t==='err'?'var(--red)':'var(--border)';e.classList.add('on');setTimeout(function(){e.classList.remove('on');},3000);}
+
+function req(method,path,body){
+  return fetch(path,{method:method,headers:{'x-admin-key':KEY,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined})
+    .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.error||r.status);return d;});});
+}
+
+function showModal(ttl,html,okTxt,okColor,cb){
+  G('mttl').textContent=ttl;G('mbody').innerHTML=html;
+  G('mok').textContent=okTxt||'تأكيد';G('mok').style.background=okColor||'var(--red)';
+  mcb=cb;G('modal').style.display='flex';
+}
+function closeModal(){G('modal').style.display='none';mcb=null;}
+G('mok').onclick=function(){if(mcb)mcb();closeModal();};
+G('modal').onclick=function(e){if(e.target===this)closeModal();};
+function openViewer(src){G('vimg').src=src;G('viewer').style.display='flex';}
+function closeViewer(){G('viewer').style.display='none';}
+G('viewer').onclick=function(e){if(e.target===this)closeViewer();};
+
+G('akey').onkeydown=function(e){if(e.key==='Enter')doLogin();};
+
+function doLogin(){
+  var k=G('akey').value.trim();
+  if(!k)return;
+  KEY=k;
+  var btn=G('lbtn');btn.disabled=true;btn.textContent='...';
+  req('GET','/api/admin/stats')
+    .then(function(){
+      sessionStorage.setItem('ak',k);
+      G('login').style.display='none';G('dash').style.display='flex';
+      go('stats');
+    })
+    .catch(function(e){
+      KEY='';btn.disabled=false;btn.textContent='دخول';
+      G('lerr').textContent=String(e.message).includes('401')||String(e.message).includes('مصرح')?'مفتاح خاطئ':'خطأ في الاتصال';
+      G('lerr').classList.add('on');
+    });
+}
+function doLogout(){KEY='';sessionStorage.removeItem('ak');G('login').style.display='flex';G('dash').style.display='none';}
+
+function go(page){
+  document.querySelectorAll('.ni').forEach(function(el){el.classList.toggle('on',el.getAttribute('data-p')===page);});
+  G('content').innerHTML='<div class="lw"><div class="spin"></div> جارٍ...</div>';
+  if(page==='stats')loadStats();
+  else if(page==='users')loadUsers(1,'');
+  else if(page==='messages')loadMsgs(1);
+  else if(page==='images')loadImgs(1);
+  else if(page==='broadcast')loadBcast();
+}
+
+function loadStats(){
+  req('GET','/api/admin/stats').then(function(r){
+    var cards=[
+      {e:'👥',l:'المستخدمون',v:r.users,bg:'#3b82f622'},
+      {e:'🟢',l:'متصل الآن',v:r.online,bg:'#22c55e22'},
+      {e:'💬',l:'الرسائل',v:r.messages,bg:'#8b5cf622'},
+      {e:'🖼️',l:'الصور',v:r.images,bg:'#f59e0b22'},
+      {e:'🎤',l:'صوتية',v:r.voice,bg:'#ec489922'},
+      {e:'🤝',l:'المحادثات',v:r.chats,bg:'#06b6d422'},
+      {e:'🆕',l:'مستخدمو اليوم',v:r.new_users_today,bg:'#22c55e22'},
+      {e:'📨',l:'رسائل اليوم',v:r.messages_today,bg:'#f59e0b22'}
+    ];
+    var h='<div class="ph"><h1>📊 الإحصائيات</h1></div><div class="sgrid">';
+    cards.forEach(function(c){h+='<div class="sc"><div class="si" style="background:'+c.bg+'">'+c.e+'</div><div><div class="sv">'+(c.v||0)+'</div><div class="sl">'+c.l+'</div></div></div>';});
+    G('content').innerHTML=h+'</div>';
+  }).catch(function(e){G('content').innerHTML='<div class="empty"><h3>خطأ: '+e.message+'</h3></div>';});
+}
+
+var upage=1,usearch='';
+function loadUsers(page,search){
+  upage=page;if(search!==undefined)usearch=search;
+  req('GET','/api/admin/users?page='+upage+'&search='+encodeURIComponent(usearch)).then(function(r){
+    var pages=Math.ceil((r.total||0)/20);
+    var h='<div class="ph"><h1>👥 المستخدمون</h1><p>'+r.total+' مستخدم</p></div>';
+    h+='<div class="box"><div class="bh"><h3>القائمة</h3><div class="sb"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input id="si" type="text" placeholder="بحث..." value="'+usearch+'"/></div></div>';
+    if(!r.users||!r.users.length){h+='<div class="empty"><h3>لا نتائج</h3></div>';}
+    else{
+      h+='<table><thead><tr><th>ID</th><th>المستخدم</th><th>البريد</th><th>الحالة</th><th>التسجيل</th><th>إجراء</th></tr></thead><tbody>';
+      r.users.forEach(function(u){
+        h+='<tr><td><span class="idb">#'+u.id+'</span></td>';
+        h+='<td><div class="uc"><div class="ua">'+(u.photo_url?'<img src="'+u.photo_url+'" alt=""/>':ini(u.name))+'</div><div><div class="un">'+u.name+(u.is_verified?' ✅':'')+'</div><div class="us">@'+u.username+'</div></div></div></td>';
+        h+='<td style="color:var(--sub);font-size:11px">'+u.email+'</td>';
+        h+='<td>'+(u.is_banned?'<span class="badge bg-red">محظور</span>':u.is_online?'<span class="badge bg-green">متصل</span>':'<span class="badge bg-gray">غير متصل</span>')+'</td>';
+        h+='<td style="color:var(--sub);font-size:11px">'+fd(u.created_at)+'</td>';
+        h+='<td><div class="acts">';
+        h+=u.is_banned?'<button class="btn btn-green btn-sm" onclick="unban('+u.id+')">رفع الحظر</button>':'<button class="btn btn-yellow btn-sm" onclick="ban('+u.id+',\''+u.name+'\')">حظر</button>';
+        h+=u.is_verified?'<button class="btn btn-gray btn-sm" onclick="unverify('+u.id+')">إلغاء التوثيق</button>':'<button class="btn btn-blue btn-sm" onclick="verify('+u.id+',\''+u.name+'\')">✅ توثيق</button>';
+        h+='<button class="btn btn-red btn-sm" onclick="delUser('+u.id+',\''+u.name+'\')">حذف</button>';
+        h+='</div></td></tr>';
+      });
+      h+='</tbody></table>';
+    }
+    h+='<div class="pager"><span class="pinfo">صفحة '+upage+' من '+pages+'</span>';
+    if(upage>1)h+='<button class="btn btn-gray btn-sm" onclick="loadUsers('+(upage-1)+')">السابق</button>';
+    if(upage<pages)h+='<button class="btn btn-gray btn-sm" onclick="loadUsers('+(upage+1)+')">التالي</button>';
+    h+='</div></div>';
+    G('content').innerHTML=h;
+    var si=G('si');if(si){si.focus();si.oninput=function(){clearTimeout(window._t);window._t=setTimeout(function(){loadUsers(1,si.value);},400);};}
+ }).catch(function(e){G('content').innerHTML='<div class="empty"><h3>خطأ: '+e.message+'</h3></div>';}); 
+ 
+}
+function ban(id,n){showModal('حظر '+n,'هل تريد حظر هذا المستخدم؟','حظر','var(--red)',function(){req('POST','/api/admin/users/'+id+'/ban',{banned:true}).then(function(){toast('✅ تم','ok');loadUsers(upage,usearch);}).catch(function(e){toast('❌ '+e.message,'err');});});}
+function unban(id){req('POST','/api/admin/users/'+id+'/ban',{banned:false}).then(function(){toast('✅ رُفع الحظر','ok');loadUsers(upage,usearch);}).catch(function(e){toast('❌ '+e.message,'err');});}
+function verify(id,n){showModal('توثيق '+n,'سيظهر ✅ بجانب اسمه.','توثيق','var(--blue)',function(){req('POST','/api/admin/users/'+id+'/verify',{verified:true}).then(function(){toast('✅ تم التوثيق','ok');loadUsers(upage,usearch);}).catch(function(e){toast('❌ '+e.message,'err');});});}
+function unverify(id){req('POST','/api/admin/users/'+id+'/verify',{verified:false}).then(function(){toast('✅ تم','ok');loadUsers(upage,usearch);}).catch(function(e){toast('❌ '+e.message,'err');});}
+function delUser(id,n){showModal('حذف '+n,'سيُحذف نهائياً.','حذف','var(--red)',function(){req('DELETE','/api/admin/users/'+id).then(function(){toast('✅ تم الحذف','ok');loadUsers(upage,usearch);}).catch(function(e){toast('❌ '+e.message,'err');});});}
+
+var mpage=1;
+function loadMsgs(page){
+  mpage=page;
+  req('GET','/api/admin/messages?page='+mpage).then(function(r){
+    var pages=Math.ceil((r.total||0)/30);
+    var h='<div class="ph"><h1>💬 الرسائل</h1><p>'+r.total+' رسالة</p></div>';
+    h+='<div class="box"><div class="bh"><h3>جميع الرسائل</h3></div>';
+    if(!r.messages||!r.messages.length){h+='<div class="empty"><h3>لا توجد رسائل</h3></div>';}
+    else{
+      h+='<table><thead><tr><th>المرسل</th><th>الرسالة</th><th>النوع</th><th>التاريخ</th><th>إجراء</th></tr></thead><tbody>';
+      r.messages.forEach(function(m){
+        var t=m.type==='image'?'🖼️':m.type==='voice'?'🎤':'💬';
+        h+='<tr><td><div class="uc"><div class="ua">'+ini(m.sender_name)+'</div><div><div class="un">'+m.sender_name+'</div><div class="us">@'+m.username+'</div></div></div></td>';
+        h+='<td style="max-width:200px;font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(m.text||'-')+'</td>';
+        h+='<td>'+t+'</td><td style="color:var(--sub);font-size:11px">'+fd(m.created_at)+'</td>';
+        h+='<td><button class="btn btn-red btn-sm" onclick="delMsg('+m.id+')">حذف</button></td></tr>';
+      });
+      h+='</tbody></table>';
+    }
+    h+='<div class="pager"><span class="pinfo">صفحة '+mpage+' من '+pages+'</span>';
+    if(mpage>1)h+='<button class="btn btn-gray btn-sm" onclick="loadMsgs('+(mpage-1)+')">السابق</button>';
+    if(mpage<pages)h+='<button class="btn btn-gray btn-sm" onclick="loadMsgs('+(mpage+1)+')">التالي</button>';
+    h+='</div></div>';
+    G('content').innerHTML=h;
+  }).catch(function(e){G('content').innerHTML='<div class="empty"><h3>خطأ: '+e.message+'</h3></div>';});
+}
+function delMsg(id){showModal('حذف الرسالة','لا يمكن التراجع.','حذف','var(--red)',function(){req('DELETE','/api/admin/messages/'+id).then(function(){toast('✅ تم','ok');loadMsgs(mpage);}).catch(function(e){toast('❌ '+e.message,'err');});});}
+
+var ipage=1;
+function loadImgs(page){
+  ipage=page;
+  req('GET','/api/admin/images?page='+ipage).then(function(r){
+    var pages=Math.ceil((r.total||0)/20);
+    var h='<div class="ph"><h1>🖼️ الصور</h1><p>'+r.total+' صورة</p></div>';
+    h+='<div class="box">';
+    if(!r.images||!r.images.length){h+='<div class="empty"><h3>لا توجد صور</h3></div>';}
+    else{
+      h+='<div class="igrid">';
+      r.images.forEach(function(img){
+        h+='<div class="icard"><img src="'+img.image_url+'" onclick="openViewer(\''+img.image_url+'\')" loading="lazy"/><div class="icardinfo"><div class="isender">'+img.sender_name+'</div><div class="itime">'+fd(img.created_at)+'</div><button class="idel" onclick="delMsg('+img.id+')">🗑️ حذف</button></div></div>';
+      });
+      h+='</div>';
+    }
+    h+='<div class="pager"><span class="pinfo">صفحة '+ipage+' من '+pages+'</span>';
+    if(ipage>1)h+='<button class="btn btn-gray btn-sm" onclick="loadImgs('+(ipage-1)+')">السابق</button>';
+    if(ipage<pages)h+='<button class="btn btn-gray btn-sm" onclick="loadImgs('+(ipage+1)+')">التالي</button>';
+    h+='</div></div>';
+    G('content').innerHTML=h;
+  }).catch(function(e){G('content').innerHTML='<div class="empty"><h3>خطأ: '+e.message+'</h3></div>';});
+}
+
+function loadBcast(){
+  G('content').innerHTML='<div class="ph"><h1>📢 إشعار</h1></div><div class="bcast"><h3>إرسال لجميع المتصلين</h3><div class="ig"><label>العنوان</label><input class="if" id="bt" type="text" value="LUMIQ"/></div><div class="ig"><label>الرسالة</label><textarea class="if" id="bm" placeholder="اكتب الرسالة..."></textarea></div><button class="btn btn-blue" onclick="sendBcast()">📢 إرسال</button></div>';
+}
+function sendBcast(){
+  var t=G('bt').value.trim(),m=G('bm').value.trim();
+  if(!m){toast('⚠️ اكتب الرسالة','err');return;}
+  req('POST','/api/admin/broadcast',{title:t,message:m}).then(function(){toast('✅ تم الإرسال','ok');G('bm').value='';}).catch(function(e){toast('❌ '+e.message,'err');});
+}
+
+(function(){
+  var k=sessionStorage.getItem('ak');
+  if(k){KEY=k;G('akey').value=k;req('GET','/api/admin/stats').then(function(){G('login').style.display='none';G('dash').style.display='flex';go('stats');}).catch(function(){KEY='';sessionStorage.removeItem('ak');});}
+})();
+</script>
+</body>
+</html>`;
+
+
+// صفحة لوحة التحكم
+app.get('/admin', function(req, res) {
+  res.send(ADMIN_HTML);
+});
+
+app.get('/api/admin/stats', adminAuth, async function(req, res) {
+  try {
+    var users    = await db.query('SELECT COUNT(*) as c FROM users');
+    var messages = await db.query('SELECT COUNT(*) as c FROM messages');
+    var images   = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='image'");
+    var voice    = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='voice'");
+    var chats    = await db.query('SELECT COUNT(*) as c FROM chats');
+    var online   = await db.query('SELECT COUNT(*) as c FROM users WHERE is_online=true');
+    var today_u  = await db.query("SELECT COUNT(*) as c FROM users WHERE created_at > NOW() - INTERVAL '24 hours'");
+    var today_m  = await db.query("SELECT COUNT(*) as c FROM messages WHERE created_at > NOW() - INTERVAL '24 hours'");
+    res.json({ users:parseInt(users.rows[0].c), messages:parseInt(messages.rows[0].c), images:parseInt(images.rows[0].c), voice:parseInt(voice.rows[0].c), chats:parseInt(chats.rows[0].c), online:parseInt(online.rows[0].c), new_users_today:parseInt(today_u.rows[0].c), messages_today:parseInt(today_m.rows[0].c) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/users', adminAuth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var search = req.query.search ? '%'+req.query.search+'%' : '%';
+    var r = await db.query('SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at FROM users WHERE username ILIKE $1 OR name ILIKE $1 ORDER BY created_at DESC LIMIT 20 OFFSET $2', [search, (page-1)*20]);
+    var total = await db.query('SELECT COUNT(*) as c FROM users WHERE username ILIKE $1 OR name ILIKE $1', [search]);
+    res.json({ users: r.rows, total: parseInt(total.rows[0].c), page: page });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/users/:id', adminAuth, async function(req, res) {
+  await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
+  await db.query('UPDATE users SET is_banned=$1 WHERE id=$2', [req.body.banned, req.params.id]);
+  if (req.body.banned && onlineUsers[String(req.params.id)]) {
+    io.to(onlineUsers[String(req.params.id)]).emit('force_logout', { reason: 'تم حظر حسابك' });
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
+  await db.query('UPDATE users SET is_verified=$1 WHERE id=$2', [req.body.verified, req.params.id]);
+  if (onlineUsers[String(req.params.id)]) {
+    io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: req.body.verified });
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/messages', adminAuth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var r = await db.query('SELECT m.id,m.text,m.type,m.created_at,u.name as sender_name,u.username FROM messages m JOIN users u ON m.sender_id=u.id ORDER BY m.created_at DESC LIMIT 30 OFFSET $1', [(page-1)*30]);
+    var total = await db.query('SELECT COUNT(*) as c FROM messages');
+    res.json({ messages: r.rows, total: parseInt(total.rows[0].c) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/messages/:id', adminAuth, async function(req, res) {
+  await db.query('DELETE FROM messages WHERE id=$1', [req.params.id]);
+  io.emit('delete_message', { id: req.params.id });
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/images', adminAuth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var r = await db.query("SELECT m.id,m.image_url,m.created_at,u.name as sender_name FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type='image' ORDER BY m.created_at DESC LIMIT 20 OFFSET $1", [(page-1)*20]);
+    var total = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='image'");
+    res.json({ images: r.rows, total: parseInt(total.rows[0].c) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
+  io.emit('broadcast', { title: req.body.title || 'LUMIQ', message: req.body.message });
+  res.json({ ok: true });
+});
+
 // ═══ SOCKET ═══
 var onlineUsers = {};
 
