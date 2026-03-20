@@ -33,6 +33,14 @@ async function initDB() {
   await db.query(CREATE_CHATS);
   await db.query(CREATE_MESSAGES);
   await db.query(CREATE_STORIES);
+  // إضافة أعمدة جديدة إذا لم تكن موجودة
+  var alters = [
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true"
+  ];
+  for (var i = 0; i < alters.length; i++) {
+    await db.query(alters[i]).catch(function(){});
+  }
   console.log('DB ready');
 }
 
