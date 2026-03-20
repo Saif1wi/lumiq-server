@@ -205,6 +205,19 @@ app.post('/api/chats/:chatId/messages/audio', auth, upload.single('audio'), asyn
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+app.put('/api/messages/:msgId', auth, async function(req, res) {
+  try {
+    var text = req.body.text;
+    if (!text) return res.status(400).json({ error: 'النص مطلوب' });
+    var result = await db.query('SELECT sender_id FROM messages WHERE id=$1', [req.params.msgId]);
+    if (!result.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    if (String(result.rows[0].sender_id) !== String(req.user.id)) return res.status(403).json({ error: 'غير مسموح' });
+    var updated = await db.query('UPDATE messages SET text=$1 WHERE id=$2 RETURNING *', [text, req.params.msgId]);
+    io.emit('edit_message', { id: req.params.msgId, text: text });
+    res.json(updated.rows[0]);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
 app.delete('/api/messages/:msgId', auth, async function(req, res) {
   await db.query('DELETE FROM messages WHERE id=$1 AND sender_id=$2', [req.params.msgId, req.user.id]);
   io.emit('delete_message', { id: req.params.msgId });
@@ -329,6 +342,10 @@ io.on('connection', function(socket) {
 
   socket.on('webrtc_ice', function(data) {
     io.to(data.to_socket_id).emit('webrtc_ice', { candidate: data.candidate });
+  });
+
+  socket.on('msg_edit', function(data) {
+    io.emit('edit_message', { id: data.id, text: data.text });
   });
 
   socket.on('disconnect', async function() {
