@@ -59,7 +59,18 @@ async function initDB() {
       reply_to    JSONB,
       created_at  TIMESTAMP DEFAULT NOW()
     );
-  `);
+    CREATE TABLE IF NOT EXISTS stories (
+      id          SERIAL PRIMARY KEY,
+      user_id     INT REFERENCES users(id) ON DELETE CASCADE,
+      type        TEXT DEFAULT 'text',
+      text        TEXT,
+      image_url   TEXT,
+      bg_color    TEXT DEFAULT 'sg1',
+      views       JSONB DEFAULT '[]',
+      expires_at  TIMESTAMP DEFAULT (NOW() + INTERVAL '24 hours'),
+      created_at  TIMESTAMP DEFAULT NOW()
+    );
+  \`);
   console.log('✅ Database ready');
 }
 
@@ -338,6 +349,73 @@ app.post('/api/chats/:chatId/read', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
+
+// ═══ STORY ROUTES ═══
+
+// نشر story نصية
+app.post('/api/stories', auth, async (req, res) => {
+  try {
+    const { text, bg_color } = req.body;
+    if (!text) return res.status(400).json({ error: 'النص مطلوب' });
+    const result = await db.query(
+      'INSERT INTO stories (user_id, type, text, bg_color) VALUES ($1,$2,$3,$4) RETURNING *',
+      [req.user.id, 'text', text, bg_color || 'sg1']
+    );
+    io.emit('new_story', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// نشر story صورة
+app.post('/api/stories/image', auth, upload.single('image'), async (req, res) => {
+  try {
+    const b64 = req.file.buffer.toString('base64');
+    const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+    const up = await cloudinary.uploader.upload(dataURI, { folder: 'lumiq/stories' });
+    const result = await db.query(
+      'INSERT INTO stories (user_id, type, image_url) VALUES ($1,$2,$3) RETURNING *',
+      [req.user.id, 'image', up.secure_url]
+    );
+    io.emit('new_story', result.rows[0]);
+    res.json(result.rows[0]);
+  } catch (e) { res.status(500).json({ error: 'فشل رفع الصورة' }); }
+});
+
+// جلب stories النشطة (أقل من 24 ساعة)
+app.get('/api/stories', auth, async (req, res) => {
+  try {
+    const result = await db.query(
+      \`SELECT s.*, u.name, u.username, u.photo_url
+       FROM stories s JOIN users u ON s.user_id = u.id
+       WHERE s.expires_at > NOW()
+       ORDER BY s.created_at DESC\`
+    );
+    res.json(result.rows);
+  } catch (e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// تسجيل مشاهدة
+app.post('/api/stories/:id/view', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const story = await db.query('SELECT views FROM stories WHERE id=$1', [id]);
+    if (!story.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    let views = story.rows[0].views || [];
+    if (!views.includes(req.user.id)) {
+      views.push(req.user.id);
+      await db.query('UPDATE stories SET views=$1 WHERE id=$2', [JSON.stringify(views), id]);
+    }
+    res.json({ views });
+  } catch (e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// حذف story
+app.delete('/api/stories/:id', auth, async (req, res) => {
+  await db.query('DELETE FROM stories WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+  io.emit('delete_story', { id: req.params.id });
+  res.json({ ok: true });
+});
+
 // ═══ SOCKET.IO ═══
 const onlineUsers = {};
 
@@ -366,6 +444,12 @@ io.on('connection', (socket) => {
   });
 
   // مؤشر يكتب
+  // Story events
+  socket.on('story_view', ({ story_id }) => {
+    // broadcast view update
+    io.emit('story_viewed', { story_id, user_id: socket.userId });
+  });
+
   socket.on('typing', ({ chat_id, user_id, is_typing }) => {
     socket.to(chat_id).emit('typing', { user_id, is_typing });
   });
@@ -431,4 +515,3 @@ initDB().then(() => {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-     
