@@ -11,7 +11,6 @@ const cloudinary = require('cloudinary').v2;
 const JWT_SECRET = process.env.JWT_SECRET || 'lumiq_secret_2024';
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:egNpBttTyFpglzpNqAGOiATDXpCHAMLO@centerbeam.proxy.rlwy.net:43941/railway';
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || 'lumiq_admin_2024';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD || 'dxahljm5o',
@@ -89,11 +88,6 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'No token' });
   try { req.user = jwt.verify(token, JWT_SECRET); next(); }
   catch(e) { res.status(401).json({ error: 'Invalid token' }); }
-}
-
-function adminAuth(req, res, next) {
-  if (req.headers['x-admin-key'] !== ADMIN_KEY) return res.status(401).json({ error: 'غير مصرح' });
-  next();
 }
 
 // ═══ AUTH ═══
@@ -284,97 +278,6 @@ app.post('/api/chats/:chatId/read', auth, async function(req, res) {
     uc[req.user.id] = 0;
     await db.query('UPDATE chats SET unread_count=$1 WHERE id=$2', [JSON.stringify(uc), req.params.chatId]);
   }
-  res.json({ ok: true });
-});
-
-// ═══ ADMIN ═══
-app.get('/api/admin/stats', adminAuth, async function(req, res) {
-  try {
-    var users    = await db.query('SELECT COUNT(*) as c FROM users');
-    var messages = await db.query('SELECT COUNT(*) as c FROM messages');
-    var images   = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='image'");
-    var voice    = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='voice'");
-    var chats    = await db.query('SELECT COUNT(*) as c FROM chats');
-    var online   = await db.query('SELECT COUNT(*) as c FROM users WHERE is_online=true');
-    var today_u  = await db.query("SELECT COUNT(*) as c FROM users WHERE created_at > NOW() - INTERVAL '24 hours'");
-    var today_m  = await db.query("SELECT COUNT(*) as c FROM messages WHERE created_at > NOW() - INTERVAL '24 hours'");
-    res.json({
-      users: parseInt(users.rows[0].c),
-      messages: parseInt(messages.rows[0].c),
-      images: parseInt(images.rows[0].c),
-      voice: parseInt(voice.rows[0].c),
-      chats: parseInt(chats.rows[0].c),
-      online: parseInt(online.rows[0].c),
-      new_users_today: parseInt(today_u.rows[0].c),
-      messages_today: parseInt(today_m.rows[0].c)
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/admin/users', adminAuth, async function(req, res) {
-  try {
-    var page = parseInt(req.query.page) || 1;
-    var search = req.query.search ? '%'+req.query.search.toLowerCase()+'%' : '%';
-    var r = await db.query('SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at FROM users WHERE username LIKE $1 OR name ILIKE $1 ORDER BY created_at DESC LIMIT 20 OFFSET $2', [search, (page-1)*20]);
-    var total = await db.query('SELECT COUNT(*) as c FROM users WHERE username LIKE $1 OR name ILIKE $1', [search]);
-    res.json({ users: r.rows, total: parseInt(total.rows[0].c), page: page });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/admin/users/:id', adminAuth, async function(req, res) {
-  await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
-  res.json({ ok: true });
-});
-
-app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
-  await db.query('UPDATE users SET is_banned=$1 WHERE id=$2', [req.body.banned, req.params.id]);
-  if (req.body.banned) {
-    var uid = String(req.params.id);
-    if (onlineUsers[uid]) io.to(onlineUsers[uid]).emit('force_logout', { reason: 'تم حظر حسابك' });
-  }
-  res.json({ ok: true });
-});
-
-app.get('/api/admin/messages', adminAuth, async function(req, res) {
-  try {
-    var page = parseInt(req.query.page) || 1;
-    var r = await db.query('SELECT m.id,m.text,m.type,m.created_at,m.chat_id,u.name as sender_name,u.username FROM messages m JOIN users u ON m.sender_id=u.id ORDER BY m.created_at DESC LIMIT 30 OFFSET $1', [(page-1)*30]);
-    var total = await db.query('SELECT COUNT(*) as c FROM messages');
-    res.json({ messages: r.rows, total: parseInt(total.rows[0].c), page: page });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/admin/messages/:id', adminAuth, async function(req, res) {
-  await db.query('DELETE FROM messages WHERE id=$1', [req.params.id]);
-  io.emit('delete_message', { id: req.params.id });
-  res.json({ ok: true });
-});
-
-app.get('/api/admin/images', adminAuth, async function(req, res) {
-  try {
-    var page = parseInt(req.query.page) || 1;
-    var r = await db.query("SELECT m.id,m.image_url,m.created_at,u.name as sender_name,u.username FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type='image' ORDER BY m.created_at DESC LIMIT 20 OFFSET $1", [(page-1)*20]);
-    var total = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='image'");
-    res.json({ images: r.rows, total: parseInt(total.rows[0].c), page: page });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// توثيق مستخدم
-app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
-  try {
-    var verified = req.body.verified;
-    await db.query('UPDATE users SET is_verified=$1 WHERE id=$2', [verified, req.params.id]);
-    // إشعار المستخدم
-    var uid = String(req.params.id);
-    if (onlineUsers[uid]) {
-      io.to(onlineUsers[uid]).emit('verified', { is_verified: verified });
-    }
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
-  io.emit('broadcast', { title: req.body.title || 'LUMIQ', message: req.body.message, time: new Date() });
   res.json({ ok: true });
 });
 
