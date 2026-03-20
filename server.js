@@ -80,6 +80,9 @@ const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*' } });
 
 app.use(cors());
+
+// Ping endpoint لمنع السيرفر من النوم
+app.get('/api/ping', (req, res) => res.json({ ok: true, time: new Date() }));
 app.use(express.json({ limit: '50mb' }));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
