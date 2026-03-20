@@ -124,12 +124,12 @@ app.post('/api/me/avatar', auth, upload.single('avatar'), async function(req, re
 app.get('/api/users/search', auth, async function(req, res) {
   var q = req.query.q ? req.query.q.toLowerCase() : '';
   if (!q || q.length < 2) return res.json([]);
-  var result = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online FROM users WHERE username LIKE $1 AND id!=$2 LIMIT 20', [q + '%', req.user.id]);
+  var result = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE username LIKE $1 AND id!=$2 LIMIT 20', [q + '%', req.user.id]);
   res.json(result.rows);
 });
 
 app.get('/api/users/:id', auth, async function(req, res) {
-  var result = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online FROM users WHERE id=$1', [req.params.id]);
+  var result = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
   if (!result.rows.length) return res.status(404).json({ error: 'غير موجود' });
   res.json(result.rows[0]);
 });
