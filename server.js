@@ -135,9 +135,16 @@ app.post('/api/admin/support/:id/reply', adminAuth, async function(req, res) {
     );
     var t = ticket.rows[0];
     // إشعار المستخدم عبر Socket
-    if (t.user_id && onlineUsers[t.user_id]) {
-      io.to(onlineUsers[t.user_id]).emit('support_reply', { ticket_id: t.id, reply: reply });
+    // إرسال للمستخدم عبر Socket
+    var uid = String(t.user_id);
+    if (uid && onlineUsers[uid]) {
+      io.to(onlineUsers[uid]).emit('support_reply', { ticket_id: t.id, reply: reply });
+    } else {
+      // broadcast للجميع - المستخدم سيستقبلها فقط لو معرّفه مطابق
+      io.emit('support_reply_' + uid, { ticket_id: t.id, reply: reply });
     }
+    // إرسال إشعار تيليجرام للمشرف بتأكيد الرد
+    sendTelegram('✅ تم إرسال الرد لـ @' + (t.username || 'مجهول') + '\n\n' + reply);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -536,7 +543,7 @@ io.on('connection', function(socket) {
     try {
       var user = jwt.verify(data.token, JWT_SECRET);
       socket.userId = user.id;
-      onlineUsers[user.id] = socket.id;
+      onlineUsers[String(user.id)] = socket.id;
       await db.query('UPDATE users SET is_online=true, last_seen=NOW() WHERE id=$1', [user.id]);
       io.emit('user_online', { user_id: user.id, is_online: true });
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(user.id)]);
