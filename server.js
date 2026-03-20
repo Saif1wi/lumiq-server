@@ -28,6 +28,8 @@ const CREATE_MESSAGES = 'CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY 
 
 const CREATE_STORIES = 'CREATE TABLE IF NOT EXISTS stories (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE CASCADE, type TEXT DEFAULT \'text\', text TEXT, image_url TEXT, bg_color TEXT DEFAULT \'sg1\', views JSONB DEFAULT \'[]\'::jsonb, expires_at TIMESTAMP DEFAULT (NOW() + INTERVAL \'24 hours\'), created_at TIMESTAMP DEFAULT NOW())';
 
+const CREATE_SUPPORT = "CREATE TABLE IF NOT EXISTS support_tickets (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE SET NULL, user_name TEXT, username TEXT, message TEXT NOT NULL, status TEXT DEFAULT 'open', reply TEXT, created_at TIMESTAMP DEFAULT NOW(), replied_at TIMESTAMP)";
+
 async function initDB() {
   await db.query(CREATE_USERS);
   await db.query(CREATE_CHATS);
