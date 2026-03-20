@@ -62,7 +62,8 @@ async function initDB() {
   // أعمدة جديدة إن لم تكن موجودة
   const alters = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true"
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
@@ -105,7 +106,7 @@ app.post('/api/register', async function(req, res) {
     if (exists.rows.length) return res.status(400).json({ error: 'اسم المستخدم أو البريد مستخدم' });
     var hash = await bcrypt.hash(password, 10);
     var result = await db.query(
-      'INSERT INTO users (name,username,email,password) VALUES ($1,$2,$3,$4) RETURNING id,name,username,email,bio,photo_url,is_online,last_seen,show_last_seen,show_online,show_join_date,created_at',
+      'INSERT INTO users (name,username,email,password) VALUES ($1,$2,$3,$4) RETURNING id,name,username,email,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at',
       [name, username.toLowerCase(), email.toLowerCase(), hash]
     );
     var user = result.rows[0];
@@ -132,7 +133,7 @@ app.post('/api/login', async function(req, res) {
 
 // ═══ USERS ═══
 app.get('/api/me', auth, async function(req, res) {
-  var r = await db.query('SELECT id,name,username,email,bio,photo_url,is_online,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
+  var r = await db.query('SELECT id,name,username,email,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
   res.json(r.rows[0]);
 });
 
@@ -165,12 +166,12 @@ app.post('/api/me/avatar', auth, upload.single('avatar'), async function(req, re
 app.get('/api/users/search', auth, async function(req, res) {
   var q = req.query.q ? req.query.q.toLowerCase() : '';
   if (!q || q.length < 2) return res.json([]);
-  var r = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE username LIKE $1 AND id!=$2 LIMIT 20', [q+'%', req.user.id]);
+  var r = await db.query('SELECT id,name,username,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE username LIKE $1 AND id!=$2 LIMIT 20', [q+'%', req.user.id]);
   res.json(r.rows);
 });
 
 app.get('/api/users/:id', auth, async function(req, res) {
-  var r = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
+  var r = await db.query('SELECT id,name,username,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
   if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
   res.json(r.rows[0]);
 });
@@ -314,7 +315,7 @@ app.get('/api/admin/users', adminAuth, async function(req, res) {
   try {
     var page = parseInt(req.query.page) || 1;
     var search = req.query.search ? '%'+req.query.search.toLowerCase()+'%' : '%';
-    var r = await db.query('SELECT id,name,username,email,photo_url,is_online,is_banned,last_seen,created_at FROM users WHERE username LIKE $1 OR name ILIKE $1 ORDER BY created_at DESC LIMIT 20 OFFSET $2', [search, (page-1)*20]);
+    var r = await db.query('SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at FROM users WHERE username LIKE $1 OR name ILIKE $1 ORDER BY created_at DESC LIMIT 20 OFFSET $2', [search, (page-1)*20]);
     var total = await db.query('SELECT COUNT(*) as c FROM users WHERE username LIKE $1 OR name ILIKE $1', [search]);
     res.json({ users: r.rows, total: parseInt(total.rows[0].c), page: page });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -355,6 +356,20 @@ app.get('/api/admin/images', adminAuth, async function(req, res) {
     var r = await db.query("SELECT m.id,m.image_url,m.created_at,u.name as sender_name,u.username FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type='image' ORDER BY m.created_at DESC LIMIT 20 OFFSET $1", [(page-1)*20]);
     var total = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='image'");
     res.json({ images: r.rows, total: parseInt(total.rows[0].c), page: page });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// توثيق مستخدم
+app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
+  try {
+    var verified = req.body.verified;
+    await db.query('UPDATE users SET is_verified=$1 WHERE id=$2', [verified, req.params.id]);
+    // إشعار المستخدم
+    var uid = String(req.params.id);
+    if (onlineUsers[uid]) {
+      io.to(onlineUsers[uid]).emit('verified', { is_verified: verified });
+    }
+    res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
