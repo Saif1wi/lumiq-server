@@ -70,7 +70,7 @@ async function initDB() {
       expires_at  TIMESTAMP DEFAULT (NOW() + INTERVAL '24 hours'),
       created_at  TIMESTAMP DEFAULT NOW()
     );
-  \`);
+  `);
   console.log('✅ Database ready');
 }
 
@@ -388,10 +388,10 @@ app.post('/api/stories/image', auth, upload.single('image'), async (req, res) =>
 app.get('/api/stories', auth, async (req, res) => {
   try {
     const result = await db.query(
-      \`SELECT s.*, u.name, u.username, u.photo_url
+      `SELECT s.*, u.name, u.username, u.photo_url
        FROM stories s JOIN users u ON s.user_id = u.id
        WHERE s.expires_at > NOW()
-       ORDER BY s.created_at DESC\`
+       ORDER BY s.created_at DESC`
     );
     res.json(result.rows);
   } catch (e) { res.status(500).json({ error: 'خطأ' }); }
@@ -518,3 +518,4 @@ initDB().then(() => {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+  
