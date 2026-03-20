@@ -370,9 +370,53 @@ io.on('connection', (socket) => {
     socket.to(chat_id).emit('typing', { user_id, is_typing });
   });
 
+  // ═══ WEBRTC VOICE CALL SIGNALING ═══
+
+  // طلب اتصال
+  socket.on('call_request', ({ to_user_id, from_user, chat_id }) => {
+    const toSocket = onlineUsers[to_user_id];
+    if (toSocket) {
+      io.to(toSocket).emit('call_incoming', { from_user, chat_id, socket_id: socket.id });
+    } else {
+      socket.emit('call_failed', { reason: 'المستخدم غير متصل' });
+    }
+  });
+
+  // قبول الاتصال
+  socket.on('call_accept', ({ to_socket_id, from_user }) => {
+    io.to(to_socket_id).emit('call_accepted', { from_user, socket_id: socket.id });
+  });
+
+  // رفض الاتصال
+  socket.on('call_reject', ({ to_socket_id }) => {
+    io.to(to_socket_id).emit('call_rejected');
+  });
+
+  // إنهاء الاتصال
+  socket.on('call_end', ({ to_socket_id }) => {
+    if (to_socket_id) io.to(to_socket_id).emit('call_ended');
+  });
+
+  // WebRTC Offer
+  socket.on('webrtc_offer', ({ to_socket_id, offer }) => {
+    io.to(to_socket_id).emit('webrtc_offer', { offer, from_socket_id: socket.id });
+  });
+
+  // WebRTC Answer
+  socket.on('webrtc_answer', ({ to_socket_id, answer }) => {
+    io.to(to_socket_id).emit('webrtc_answer', { answer });
+  });
+
+  // WebRTC ICE Candidate
+  socket.on('webrtc_ice', ({ to_socket_id, candidate }) => {
+    io.to(to_socket_id).emit('webrtc_ice', { candidate });
+  });
+
   // قطع الاتصال
   socket.on('disconnect', async () => {
     if (socket.userId) {
+      // إنهاء أي اتصال جارٍ
+      io.emit('call_ended');
       delete onlineUsers[socket.userId];
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
       io.emit('user_online', { user_id: socket.userId, is_online: false, last_seen: new Date() });
@@ -387,3 +431,4 @@ initDB().then(() => {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+     
