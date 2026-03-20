@@ -32,6 +32,7 @@ async function initDB() {
   await db.query(CREATE_USERS);
   await db.query(CREATE_CHATS);
   await db.query(CREATE_MESSAGES);
+  await db.query(CREATE_SUPPORT);
   await db.query(CREATE_STORIES);
   // إضافة أعمدة جديدة إذا لم تكن موجودة
   var alters = [
@@ -54,6 +55,107 @@ app.use(express.json({ limit: '50mb' }));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 app.get('/api/ping', function(req, res) { res.json({ ok: true }); });
+
+// ══ TELEGRAM HELPER ══
+var TG_TOKEN = process.env.TG_TOKEN || '8611588513:AAEl2vPlEZ1CQMmpK6AqTkTlXRTIRk0Es_A';
+var TG_CHAT  = process.env.TG_CHAT  || '1877073380';
+
+function sendTelegram(text) {
+  var https = require('https');
+  var body = JSON.stringify({ chat_id: TG_CHAT, text: text, parse_mode: 'HTML' });
+  var opts = {
+    hostname: 'api.telegram.org',
+    path: '/bot' + TG_TOKEN + '/sendMessage',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+  };
+  var req = https.request(opts, function(res) {});
+  req.on('error', function(e) { console.error('TG error:', e.message); });
+  req.write(body);
+  req.end();
+}
+
+// ══ SUPPORT ROUTES ══
+
+// إرسال رسالة دعم
+app.post('/api/support', auth, async function(req, res) {
+  try {
+    var message = req.body.message;
+    if (!message || !message.trim()) return res.status(400).json({ error: 'الرسالة فارغة' });
+    var user = await db.query('SELECT name, username FROM users WHERE id=$1', [req.user.id]);
+    var u = user.rows[0] || {};
+    var result = await db.query(
+      'INSERT INTO support_tickets (user_id, user_name, username, message) VALUES ($1,$2,$3,$4) RETURNING *',
+      [req.user.id, u.name, u.username, message.trim()]
+    );
+    var ticket = result.rows[0];
+    // إرسال لتيليجرام
+    var tgText = '<b>🆘 رسالة دعم جديدة #' + ticket.id + '</b>\n' +
+      '<b>المستخدم:</b> ' + (u.name || 'غير معروف') + ' (@' + (u.username || '') + ')\n' +
+      '<b>ID:</b> ' + req.user.id + '\n' +
+      '<b>الرسالة:</b>\n' + message.trim();
+    sendTelegram(tgText);
+    res.json({ ok: true, id: ticket.id });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ في الخادم' }); }
+});
+
+// جلب تذاكر المستخدم
+app.get('/api/support/my', auth, async function(req, res) {
+  try {
+    var result = await db.query('SELECT id, message, reply, status, created_at, replied_at FROM support_tickets WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20', [req.user.id]);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// جلب تذاكر الدعم (Admin)
+app.get('/api/admin/support', adminAuth, async function(req, res) {
+  try {
+    var status = req.query.status || 'all';
+    var query = status === 'all'
+      ? 'SELECT * FROM support_tickets ORDER BY created_at DESC LIMIT 50'
+      : 'SELECT * FROM support_tickets WHERE status=$1 ORDER BY created_at DESC LIMIT 50';
+    var params = status === 'all' ? [] : [status];
+    var result = await db.query(query, params);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// الرد على تذكرة (Admin)
+app.post('/api/admin/support/:id/reply', adminAuth, async function(req, res) {
+  try {
+    var reply = req.body.reply;
+    if (!reply) return res.status(400).json({ error: 'الرد فارغ' });
+    var ticket = await db.query('SELECT * FROM support_tickets WHERE id=$1', [req.params.id]);
+    if (!ticket.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    await db.query(
+      'UPDATE support_tickets SET reply=$1, status=$2, replied_at=NOW() WHERE id=$3',
+      [reply, 'closed', req.params.id]
+    );
+    var t = ticket.rows[0];
+    // إشعار المستخدم عبر Socket
+    if (t.user_id && onlineUsers[t.user_id]) {
+      io.to(onlineUsers[t.user_id]).emit('support_reply', { ticket_id: t.id, reply: reply });
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.get('/api/public/user/:username', async function(req, res) {
+  try {
+    var result = await db.query('SELECT id,name,username,photo_url,bio FROM users WHERE username=$1', [req.params.username.toLowerCase()]);
+    if (!result.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    res.json(result.rows[0]);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// جلب مستخدم عبر username (للدعم الفني)
+app.get('/api/users/by-username/:username', auth, async function(req, res) {
+  try {
+    var result = await db.query('SELECT id,name,username,bio,photo_url,is_online,last_seen,show_last_seen,show_online FROM users WHERE username=$1', [req.params.username.toLowerCase()]);
+    if (!result.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    res.json(result.rows[0]);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
 
 function auth(req, res, next) {
   var token = req.headers.authorization && req.headers.authorization.split(' ')[1];
