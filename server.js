@@ -79,6 +79,7 @@ app.post('/api/login', async function(req, res) {
     var result = await db.query('SELECT * FROM users WHERE email=$1', [email.toLowerCase()]);
     var user = result.rows[0];
     if (!user) return res.status(400).json({ error: 'البريد غير موجود' });
+    if (user.is_banned) return res.status(403).json({ error: 'تم حظر حسابك من قبل الإدارة' });
     var ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(400).json({ error: 'كلمة المرور خاطئة' });
     await db.query('UPDATE users SET is_online=true, last_seen=NOW() WHERE id=$1', [user.id]);
@@ -295,6 +296,127 @@ app.delete('/api/stories/:id', auth, async function(req, res) {
   res.json({ ok: true });
 });
 
+
+// ══ ADMIN ROUTES ══
+var ADMIN_KEY = process.env.ADMIN_KEY || 'lumiq_admin_2024';
+
+function adminAuth(req, res, next) {
+  var key = req.headers['x-admin-key'];
+  if (key !== ADMIN_KEY) return res.status(401).json({ error: 'غير مصرح' });
+  next();
+}
+
+// إحصائيات عامة
+app.get('/api/admin/stats', adminAuth, async function(req, res) {
+  try {
+    var users = await db.query('SELECT COUNT(*) as count FROM users');
+    var messages = await db.query('SELECT COUNT(*) as count FROM messages');
+    var images = await db.query("SELECT COUNT(*) as count FROM messages WHERE type='image'");
+    var voice = await db.query("SELECT COUNT(*) as count FROM messages WHERE type='voice'");
+    var chats = await db.query('SELECT COUNT(*) as count FROM chats');
+    var online = await db.query('SELECT COUNT(*) as count FROM users WHERE is_online=true');
+    var today = await db.query("SELECT COUNT(*) as count FROM users WHERE created_at > NOW() - INTERVAL '24 hours'");
+    var msgs_today = await db.query("SELECT COUNT(*) as count FROM messages WHERE created_at > NOW() - INTERVAL '24 hours'");
+    res.json({
+      users: parseInt(users.rows[0].count),
+      messages: parseInt(messages.rows[0].count),
+      images: parseInt(images.rows[0].count),
+      voice: parseInt(voice.rows[0].count),
+      chats: parseInt(chats.rows[0].count),
+      online: parseInt(online.rows[0].count),
+      new_users_today: parseInt(today.rows[0].count),
+      messages_today: parseInt(msgs_today.rows[0].count)
+    });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// قائمة المستخدمين
+app.get('/api/admin/users', adminAuth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var limit = 20;
+    var offset = (page - 1) * limit;
+    var search = req.query.search ? '%' + req.query.search.toLowerCase() + '%' : '%';
+    var result = await db.query(
+      'SELECT id, name, username, email, is_online, is_banned, last_seen, created_at, photo_url FROM users WHERE username LIKE $1 OR name ILIKE $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3',
+      [search, limit, offset]
+    );
+    var total = await db.query('SELECT COUNT(*) as count FROM users WHERE username LIKE $1 OR name ILIKE $1', [search]);
+    res.json({ users: result.rows, total: parseInt(total.rows[0].count), page: page });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// حذف مستخدم
+app.delete('/api/admin/users/:id', adminAuth, async function(req, res) {
+  try {
+    await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// حظر/رفع حظر مستخدم
+app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
+  try {
+    var banned = req.body.banned;
+    await db.query('UPDATE users SET is_banned=$1 WHERE id=$2', [banned, req.params.id]);
+    if (banned) {
+      var toSocket = onlineUsers[req.params.id];
+      if (toSocket) io.to(toSocket).emit('force_logout', { reason: 'تم حظر حسابك' });
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// عرض الصور المرسلة
+app.get('/api/admin/images', adminAuth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var limit = 20;
+    var offset = (page - 1) * limit;
+    var result = await db.query(
+      'SELECT m.id, m.image_url, m.created_at, m.chat_id, u.name as sender_name, u.username FROM messages m JOIN users u ON m.sender_id = u.id WHERE m.type=$1 ORDER BY m.created_at DESC LIMIT $2 OFFSET $3',
+      ['image', limit, offset]
+    );
+    var total = await db.query("SELECT COUNT(*) as count FROM messages WHERE type='image'");
+    res.json({ images: result.rows, total: parseInt(total.rows[0].count), page: page });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// عرض الرسائل
+app.get('/api/admin/messages', adminAuth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var limit = 30;
+    var offset = (page - 1) * limit;
+    var result = await db.query(
+      'SELECT m.id, m.text, m.type, m.created_at, m.chat_id, u.name as sender_name, u.username FROM messages m JOIN users u ON m.sender_id = u.id ORDER BY m.created_at DESC LIMIT $1 OFFSET $2',
+      [limit, offset]
+    );
+    var total = await db.query('SELECT COUNT(*) as count FROM messages');
+    res.json({ messages: result.rows, total: parseInt(total.rows[0].count), page: page });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// حذف رسالة (admin)
+app.delete('/api/admin/messages/:id', adminAuth, async function(req, res) {
+  try {
+    await db.query('DELETE FROM messages WHERE id=$1', [req.params.id]);
+    io.emit('delete_message', { id: req.params.id });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// إرسال إشعار لجميع المستخدمين
+app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
+  try {
+    var message = req.body.message;
+    var title = req.body.title || 'LUMIQ';
+    if (!message) return res.status(400).json({ error: 'الرسالة مطلوبة' });
+    io.emit('broadcast', { title: title, message: message, time: new Date() });
+    res.json({ ok: true, sent: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
 var onlineUsers = {};
 
 io.on('connection', function(socket) {
@@ -307,6 +429,12 @@ io.on('connection', function(socket) {
       io.emit('user_online', { user_id: user.id, is_online: true });
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(user.id)]);
       chats.rows.forEach(function(c) { socket.join(c.id); });
+      // Check if banned
+      var banCheck = await db.query('SELECT is_banned FROM users WHERE id=$1', [user.id]);
+      if (banCheck.rows.length && banCheck.rows[0].is_banned) {
+        socket.emit('force_logout', { reason: 'تم حظر حسابك' });
+        socket.disconnect();
+      }
     } catch(e) { console.error('join error:', e.message); }
   });
 
