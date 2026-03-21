@@ -189,7 +189,14 @@ app.get('/api/users/search', auth, async function(req, res) {
 app.get('/api/users/:id', auth, async function(req, res) {
   var r = await db.query('SELECT id,name,username,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
   if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
-  res.json(r.rows[0]);
+  var user = r.rows[0];
+  // إذا المطلوب حظر الطالب: أخفِ بياناته عنه
+  var blocked = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.params.id, req.user.id]);
+  if (blocked.rows.length) {
+    // هو حظرني: أُخفي صورتي وآخر ظهوري عنه فقط (لا نغير الاسم هنا، الكلاينت يتحكم بالعرض)
+    user = Object.assign({}, user, { photo_url: '', is_online: false, last_seen: null, show_online: false, show_last_seen: false });
+  }
+  res.json(user);
 });
 
 // ✅ إصلاح: حذف المستخدم يحذف كل بياناته
