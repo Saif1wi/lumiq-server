@@ -57,6 +57,7 @@ async function initDB() {
     seen BOOLEAN DEFAULT false,
     reactions JSONB DEFAULT '{}',
     reply_to JSONB,
+    forwarded BOOLEAN DEFAULT false,
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
@@ -64,7 +65,8 @@ async function initDB() {
   var alters = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false"
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
@@ -313,9 +315,10 @@ app.post('/api/chats/:chatId/messages', auth, async function(req, res) {
       }
     }
 
+    var forwarded = req.body.forwarded === true;
     var r = await db.query(
-      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [chatId, req.user.id, 'text', text.trim(), reply_to ? JSON.stringify(reply_to) : null]
+      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,forwarded) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [chatId, req.user.id, 'text', text.trim(), reply_to ? JSON.stringify(reply_to) : null, forwarded]
     );
     var msg = r.rows[0];
 
