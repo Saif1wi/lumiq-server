@@ -78,6 +78,17 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(blocker_id, blocked_id)
   )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS notification_reads (
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    notification_id INT REFERENCES notifications(id) ON DELETE CASCADE,
+    PRIMARY KEY(user_id, notification_id)
+  )`);
   console.log('✅ DB ready');
 }
 
@@ -758,8 +769,49 @@ app.get('/api/admin/images', adminAuth, async function(req, res) {
 });
 
 app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
-  io.emit('broadcast', { title: req.body.title || 'LUMIQ', message: req.body.message });
-  res.json({ ok: true });
+  try {
+    var title = req.body.title || 'LUMIQ';
+    var message = req.body.message || '';
+    // حفظ الإشعار في قاعدة البيانات
+    var r = await db.query(
+      'INSERT INTO notifications (title, message) VALUES ($1, $2) RETURNING *',
+      [title, message]
+    );
+    var notif = r.rows[0];
+    // إرسال فوري للمتصلين
+    io.emit('broadcast', { id: notif.id, title: title, message: message, created_at: notif.created_at });
+    res.json({ ok: true, sent: Object.keys(require('./package.json') ? {} : {}).length });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+// جلب الإشعارات غير المقروءة للمستخدم
+app.get('/api/notifications', auth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT n.*, (SELECT COUNT(*) FROM notification_reads nr WHERE nr.notification_id=n.id AND nr.user_id=$1) as is_read FROM notifications n ORDER BY n.created_at DESC LIMIT 50',
+      [req.user.id]
+    );
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// تعليم إشعار كمقروء
+app.post('/api/notifications/read', auth, async function(req, res) {
+  try {
+    var ids = req.body.ids || [];
+    if (!ids.length) {
+      // قراءة الكل
+      var all = await db.query('SELECT id FROM notifications');
+      ids = all.rows.map(function(r) { return r.id; });
+    }
+    for (var i = 0; i < ids.length; i++) {
+      await db.query(
+        'INSERT INTO notification_reads (user_id, notification_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [req.user.id, ids[i]]
+      ).catch(function() {});
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
 // ═══ SOCKET ═══
@@ -776,6 +828,15 @@ io.on('connection', function(socket) {
       io.emit('user_online', { user_id: user.id, is_online: true });
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(user.id)]);
       chats.rows.forEach(function(c) { socket.join(c.id); });
+
+      // إرسال الإشعارات غير المقروءة عند الاتصال
+      var pending = await db.query(
+        'SELECT n.* FROM notifications n WHERE n.id NOT IN (SELECT notification_id FROM notification_reads WHERE user_id=$1) ORDER BY n.created_at ASC',
+        [user.id]
+      );
+      if (pending.rows.length > 0) {
+        socket.emit('pending_notifications', { notifications: pending.rows });
+      }
     } catch(e) { console.error('join error:', e.message); }
   });
 
