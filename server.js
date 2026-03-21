@@ -69,6 +69,13 @@ async function initDB() {
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
   }
+  await db.query(`CREATE TABLE IF NOT EXISTS blocks (
+    id SERIAL PRIMARY KEY,
+    blocker_id INT REFERENCES users(id) ON DELETE CASCADE,
+    blocked_id INT REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(blocker_id, blocked_id)
+  )`);
   console.log('✅ DB ready');
 }
 
@@ -197,6 +204,41 @@ app.delete('/api/me', auth, async function(req, res) {
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
+// ═══ BLOCK ═══
+app.post('/api/block', auth, async function(req, res) {
+  try {
+    var targetId = parseInt(req.body.user_id);
+    if (!targetId || targetId === req.user.id) return res.status(400).json({ error: 'غير صالح' });
+    await db.query('INSERT INTO blocks (blocker_id,blocked_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [req.user.id, targetId]);
+    // إشعار المحظور
+    if (onlineUsers[String(targetId)]) {
+      io.to(onlineUsers[String(targetId)]).emit('you_are_blocked', { by_user_id: req.user.id });
+    }
+    res.json({ ok: true });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/unblock', auth, async function(req, res) {
+  try {
+    var targetId = parseInt(req.body.user_id);
+    await db.query('DELETE FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.user.id, targetId]);
+    if (onlineUsers[String(targetId)]) {
+      io.to(onlineUsers[String(targetId)]).emit('you_are_unblocked', { by_user_id: req.user.id });
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// التحقق من حالة الحظر بين مستخدمين
+app.get('/api/block/status/:userId', auth, async function(req, res) {
+  try {
+    var targetId = parseInt(req.params.userId);
+    var iBlocked = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.user.id, targetId]);
+    var theyBlocked = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [targetId, req.user.id]);
+    res.json({ i_blocked: iBlocked.rows.length > 0, they_blocked: theyBlocked.rows.length > 0 });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
 // ═══ CHATS ═══
 app.post('/api/chats', auth, async function(req, res) {
   try {
@@ -249,6 +291,15 @@ app.post('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
     var chatId = req.params.chatId, text = req.body.text, reply_to = req.body.reply_to;
     if (!text || !text.trim()) return res.status(400).json({ error: 'الرسالة فارغة' });
+    // التحقق من الحظر
+    var chat = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    if (chat.rows.length) {
+      var otherPid = chat.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+      if (otherPid) {
+        var blockCheck = await db.query('SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)', [req.user.id, otherPid]);
+        if (blockCheck.rows.length) return res.status(403).json({ error: 'blocked' });
+      }
+    }
 
     var r = await db.query(
       'INSERT INTO messages (chat_id,sender_id,type,text,reply_to) VALUES ($1,$2,$3,$4,$5) RETURNING *',
@@ -279,6 +330,14 @@ app.post('/api/chats/:chatId/messages/image', auth, upload.single('image'), asyn
   try {
     var chatId = req.params.chatId;
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
+    var chatCheck = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    if (chatCheck.rows.length) {
+      var otherPid2 = chatCheck.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+      if (otherPid2) {
+        var bc2 = await db.query('SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)', [req.user.id, otherPid2]);
+        if (bc2.rows.length) return res.status(403).json({ error: 'blocked' });
+      }
+    }
 
     var b64 = req.file.buffer.toString('base64');
     var up = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
@@ -316,6 +375,14 @@ app.post('/api/chats/:chatId/messages/audio', auth, upload.single('audio'), asyn
     var chatId = req.params.chatId;
     var duration = parseInt(req.body.duration) || 0;
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
+    var chatCheck3 = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    if (chatCheck3.rows.length) {
+      var otherPid3 = chatCheck3.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+      if (otherPid3) {
+        var bc3 = await db.query('SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)', [req.user.id, otherPid3]);
+        if (bc3.rows.length) return res.status(403).json({ error: 'blocked' });
+      }
+    }
 
     var b64 = req.file.buffer.toString('base64');
     var up = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
@@ -707,10 +774,24 @@ io.on('connection', function(socket) {
     }
   });
 
-  socket.on('call_request', function(data) {
-    var to = onlineUsers[String(data.to_user_id)];
-    if (to) io.to(to).emit('call_incoming', { from_user: data.from_user, chat_id: data.chat_id, socket_id: socket.id });
-    else socket.emit('call_failed', { reason: 'المستخدم غير متصل حالياً' });
+  socket.on('call_request', async function(data) {
+    try {
+      // التحقق من الحظر قبل الاتصال
+      var blockCheck = await db.query(
+        'SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)',
+        [socket.userId, data.to_user_id]
+      );
+      if (blockCheck.rows.length) {
+        socket.emit('call_failed', { reason: 'لا يمكن الاتصال بهذا المستخدم' });
+        return;
+      }
+      var to = onlineUsers[String(data.to_user_id)];
+      if (to) io.to(to).emit('call_incoming', { from_user: data.from_user, chat_id: data.chat_id, socket_id: socket.id });
+      else socket.emit('call_failed', { reason: 'المستخدم غير متصل حالياً' });
+    } catch(e) {
+      var to2 = onlineUsers[String(data.to_user_id)];
+      if (to2) io.to(to2).emit('call_incoming', { from_user: data.from_user, chat_id: data.chat_id, socket_id: socket.id });
+    }
   });
 
   socket.on('call_accept',   function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('call_accepted',  { from_user: d.from_user, socket_id: socket.id }); });
