@@ -219,6 +219,25 @@ app.get('/api/chats', auth, async function(req, res) {
 });
 
 // ═══ MESSAGES ═══
+
+// ✅ حذف المحادثة نهائياً للطرفين
+app.delete('/api/chats/:chatId/delete', auth, async function(req, res) {
+  try {
+    var chatId = req.params.chatId;
+    // التحقق أن المستخدم عضو في المحادثة
+    var chat = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    if (!chat.rows.length) return res.status(404).json({ error: 'المحادثة غير موجودة' });
+    var participants = chat.rows[0].participants || [];
+    if (!participants.includes(String(req.user.id))) return res.status(403).json({ error: 'غير مسموح' });
+    // حذف الرسائل أولاً ثم المحادثة
+    await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
+    await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
+    // إشعار الطرف الآخر بحذف المحادثة
+    io.to(chatId).emit('chat_deleted', { chat_id: chatId });
+    res.json({ ok: true });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
 app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
     var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [req.params.chatId]);
