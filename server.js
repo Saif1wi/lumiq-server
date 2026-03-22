@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const http = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
@@ -107,6 +108,30 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
 app.options('*', cors());
 app.use(express.json({ limit: '50mb' }));
+
+// ═══ STATIC FILES ═══
+// خدمة sw.js مع الـ headers المطلوبة
+app.get('/sw.js', function(req, res) {
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.setHeader('Content-Type', 'application/javascript');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'sw.js'));
+});
+
+// خدمة manifest.json
+app.get('/manifest.json', function(req, res) {
+  res.setHeader('Content-Type', 'application/manifest+json');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.join(__dirname, 'manifest.json'));
+});
+
+// خدمة icon-192.png و icon-512.png
+app.get('/icon-:size.png', function(req, res) {
+  var file = path.join(__dirname, 'icon-' + req.params.size + '.png');
+  res.sendFile(file, function(err) {
+    if (err) res.status(404).end();
+  });
+});
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
