@@ -948,6 +948,16 @@ io.on('connection', function(socket) {
     }
   });
 
+  socket.on('messages_seen', function(data) {
+    // أعلم المرسل الأصلي أن رسائله قُرئت
+    if (data.partner_id && onlineUsers[String(data.partner_id)]) {
+      io.to(onlineUsers[String(data.partner_id)]).emit('messages_seen', {
+        chat_id: data.chat_id,
+        reader_id: data.reader_id
+      });
+    }
+  });
+
   socket.on('call_request', async function(data) {
     try {
       // التحقق من الحظر قبل الاتصال
