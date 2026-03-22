@@ -58,6 +58,9 @@ async function initDB() {
     reactions JSONB DEFAULT '{}',
     reply_to JSONB,
     forwarded BOOLEAN DEFAULT false,
+    location JSONB,
+    gif_url TEXT,
+    gif_title TEXT,
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
@@ -66,7 +69,10 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false",
-    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false"
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS location JSONB",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS gif_url TEXT",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS gif_title TEXT"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
@@ -417,9 +423,13 @@ app.post('/api/chats/:chatId/messages', auth, async function(req, res) {
     }
 
     var forwarded = req.body.forwarded === true;
+    var location = req.body.location || null;
+    var gif_url = req.body.gif_url || null;
+    var gif_title = req.body.gif_title || null;
+    var msgType = location ? 'location' : gif_url ? 'gif' : 'text';
     var r = await db.query(
-      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,forwarded) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-      [chatId, req.user.id, 'text', text.trim(), reply_to ? JSON.stringify(reply_to) : null, forwarded]
+      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,forwarded,location,gif_url,gif_title) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
+      [chatId, req.user.id, msgType, text ? text.trim() : null, reply_to ? JSON.stringify(reply_to) : null, forwarded, location ? JSON.stringify(location) : null, gif_url, gif_title]
     );
     var msg = r.rows[0];
 
