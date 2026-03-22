@@ -759,7 +759,7 @@ app.get('/api/admin/chats/:id/messages', adminAuth, async function(req, res) {
 // تغيير كلمة مرور مستخدم
 app.post('/api/admin/users/:id/password', adminAuth, async function(req, res) {
   try {
-    var hash = await require('bcryptjs').hash(req.body.password, 10);
+    var hash = await bcrypt.hash(req.body.password, 10);
     await db.query('UPDATE users SET password=$1 WHERE id=$2', [hash, req.params.id]);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -919,3 +919,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
