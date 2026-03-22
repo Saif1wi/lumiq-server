@@ -665,13 +665,10 @@ app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
     var banned = req.body.banned !== false;
     var reason = req.body.reason || 'تم حظر حسابك من قِبَل الإدارة';
     await db.query('UPDATE users SET is_banned=$1 WHERE id=$2', [banned, req.params.id]);
-    if (onlineUsers[String(req.params.id)]) {
-      if (banned) {
-        io.to(onlineUsers[String(req.params.id)]).emit('force_logout', {
-          type: 'ban',
-          reason: reason
-        });
-      }
+    // أرسل الـ event أولاً قبل أي شيء
+    if (banned && onlineUsers[String(req.params.id)]) {
+      var payload = { type: 'ban', reason: reason };
+      io.to(onlineUsers[String(req.params.id)]).emit('force_logout', payload);
     }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
