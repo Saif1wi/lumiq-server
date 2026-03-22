@@ -78,6 +78,14 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(blocker_id, blocked_id)
   )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS friendships (
+    id SERIAL PRIMARY KEY,
+    requester_id INT REFERENCES users(id) ON DELETE CASCADE,
+    addressee_id INT REFERENCES users(id) ON DELETE CASCADE,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(requester_id, addressee_id)
+  )`);
   await db.query(`CREATE TABLE IF NOT EXISTS notifications (
     id SERIAL PRIMARY KEY,
     title TEXT NOT NULL,
@@ -261,6 +269,88 @@ app.get('/api/block/status/:userId', auth, async function(req, res) {
     var iBlocked = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.user.id, targetId]);
     var theyBlocked = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [targetId, req.user.id]);
     res.json({ i_blocked: iBlocked.rows.length > 0, they_blocked: theyBlocked.rows.length > 0 });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// ═══ FRIENDS ═══
+
+// إرسال طلب صداقة
+app.post('/api/friends/request', auth, async function(req, res) {
+  try {
+    var targetId = parseInt(req.body.user_id);
+    if (!targetId || targetId === req.user.id) return res.status(400).json({ error: 'غير صالح' });
+    // تحقق من الحظر
+    var blocked = await db.query('SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)', [req.user.id, targetId]);
+    if (blocked.rows.length) return res.status(403).json({ error: 'لا يمكن إرسال طلب' });
+    // تحقق إذا موجود مسبقاً
+    var exists = await db.query('SELECT * FROM friendships WHERE (requester_id=$1 AND addressee_id=$2) OR (requester_id=$2 AND addressee_id=$1)', [req.user.id, targetId]);
+    if (exists.rows.length) return res.status(400).json({ error: 'طلب موجود مسبقاً', status: exists.rows[0].status });
+    await db.query('INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1,$2,$3)', [req.user.id, targetId, 'pending']);
+    // إشعار الطرف الآخر
+    var sender = await db.query('SELECT id,name,username,photo_url,is_verified FROM users WHERE id=$1', [req.user.id]);
+    if (onlineUsers[String(targetId)]) {
+      io.to(onlineUsers[String(targetId)]).emit('friend_request', { from: sender.rows[0] });
+    }
+    res.json({ ok: true });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+// قبول طلب صداقة
+app.post('/api/friends/accept', auth, async function(req, res) {
+  try {
+    var requesterId = parseInt(req.body.user_id);
+    var r = await db.query('UPDATE friendships SET status=$1 WHERE requester_id=$2 AND addressee_id=$3 AND status=$4 RETURNING *', ['accepted', requesterId, req.user.id, 'pending']);
+    if (!r.rows.length) return res.status(404).json({ error: 'الطلب غير موجود' });
+    // إشعار المرسل
+    var accepter = await db.query('SELECT id,name,username,photo_url,is_verified FROM users WHERE id=$1', [req.user.id]);
+    if (onlineUsers[String(requesterId)]) {
+      io.to(onlineUsers[String(requesterId)]).emit('friend_accepted', { by: accepter.rows[0] });
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// رفض/إلغاء طلب صداقة
+app.post('/api/friends/reject', auth, async function(req, res) {
+  try {
+    var otherId = parseInt(req.body.user_id);
+    await db.query('DELETE FROM friendships WHERE (requester_id=$1 AND addressee_id=$2) OR (requester_id=$2 AND addressee_id=$1)', [req.user.id, otherId]);
+    if (onlineUsers[String(otherId)]) {
+      io.to(onlineUsers[String(otherId)]).emit('friend_rejected', { by_user_id: req.user.id });
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// جلب قائمة الأصدقاء
+app.get('/api/friends', auth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT u.id,u.name,u.username,u.photo_url,u.is_online,u.is_verified,u.last_seen,u.show_online,u.show_last_seen, f.status, f.requester_id FROM friendships f JOIN users u ON (CASE WHEN f.requester_id=$1 THEN f.addressee_id ELSE f.requester_id END)=u.id WHERE (f.requester_id=$1 OR f.addressee_id=$1) ORDER BY f.created_at DESC',
+      [req.user.id]
+    );
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// جلب طلبات الصداقة الواردة
+app.get('/api/friends/requests', auth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT u.id,u.name,u.username,u.photo_url,u.is_verified,f.created_at FROM friendships f JOIN users u ON f.requester_id=u.id WHERE f.addressee_id=$1 AND f.status=$2 ORDER BY f.created_at DESC',
+      [req.user.id, 'pending']
+    );
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// حالة الصداقة مع مستخدم
+app.get('/api/friends/status/:userId', auth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM friendships WHERE (requester_id=$1 AND addressee_id=$2) OR (requester_id=$2 AND addressee_id=$1)', [req.user.id, req.params.userId]);
+    if (!r.rows.length) return res.json({ status: 'none' });
+    var f = r.rows[0];
+    res.json({ status: f.status, i_requested: String(f.requester_id) === String(req.user.id) });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -836,6 +926,14 @@ io.on('connection', function(socket) {
       );
       if (pending.rows.length > 0) {
         socket.emit('pending_notifications', { notifications: pending.rows });
+      }
+      // إرسال طلبات الصداقة المعلقة
+      var pendingFriends = await db.query(
+        'SELECT u.id,u.name,u.username,u.photo_url,u.is_verified FROM friendships f JOIN users u ON f.requester_id=u.id WHERE f.addressee_id=$1 AND f.status=$2',
+        [user.id, 'pending']
+      );
+      if (pendingFriends.rows.length > 0) {
+        socket.emit('pending_friend_requests', { requests: pendingFriends.rows });
       }
     } catch(e) { console.error('join error:', e.message); }
   });
