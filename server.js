@@ -116,22 +116,25 @@ app.get('/sw.js', function(req, res) {
   res.setHeader('Service-Worker-Allowed', '/');
   res.setHeader('Content-Type', 'application/javascript');
   res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'sw.js'));
+  // نرسل المحتوى مباشرة بدون sendFile
+  var swCode = "// LUMIQ Service Worker v2\nvar CACHE_NAME = 'lumiq-v2';\nself.addEventListener('install', function(e) { self.skipWaiting(); });\nself.addEventListener('activate', function(e) {\n  e.waitUntil(caches.keys().then(function(keys) {\n    return Promise.all(keys.filter(function(k){return k!==CACHE_NAME;}).map(function(k){return caches.delete(k);}));\n  })); self.clients.claim();\n});\nself.addEventListener('fetch', function(e) {\n  var url=e.request.url;\n  if(url.includes('/api/')||url.includes('/socket.io')||e.request.method!=='GET') return;\n  e.respondWith(caches.open(CACHE_NAME).then(function(cache){\n    return cache.match(e.request).then(function(cached){\n      var fp=fetch(e.request).then(function(res){if(res&&res.status===200)cache.put(e.request,res.clone());return res;}).catch(function(){return cached;});\n      return cached||fp;\n    });\n  }));\n});\nself.addEventListener('push',function(e){if(!e.data)return;var d={};try{d=e.data.json();}catch(err){d={title:'LUMIQ',body:e.data.text()};}e.waitUntil(self.registration.showNotification(d.title||'LUMIQ',{body:d.body||'',icon:d.icon||'/icon-192.png',badge:'/icon-192.png',tag:d.tag||'lumiq',data:{url:d.url||'/'}}));});\nself.addEventListener('notificationclick',function(e){e.notification.close();e.waitUntil(clients.matchAll({type:'window'}).then(function(cls){for(var c of cls){if('focus'in c)return c.focus();}if(clients.openWindow)return clients.openWindow('/');}));});";
+  res.send(swCode);
 });
 
 // خدمة manifest.json
 app.get('/manifest.json', function(req, res) {
   res.setHeader('Content-Type', 'application/manifest+json');
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.sendFile(path.join(__dirname, 'manifest.json'));
+  res.json({"name": "LUMIQ", "short_name": "LUMIQ", "description": "تواصل بذكاء مع من تحب", "start_url": "/", "display": "standalone", "orientation": "portrait", "background_color": "#0a0a0f", "theme_color": "#0A84FF", "lang": "ar", "dir": "rtl", "icons": [{"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"}, {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}]});
 });
 
 // خدمة icon-192.png و icon-512.png
 app.get('/icon-:size.png', function(req, res) {
-  var file = path.join(__dirname, 'icon-' + req.params.size + '.png');
-  res.sendFile(file, function(err) {
-    if (err) res.status(404).end();
-  });
+  // أرسل placeholder SVG إذا لم يوجد أيقونة
+  var size = parseInt(req.params.size) || 192;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'"><rect width="'+size+'" height="'+size+'" rx="'+(size*0.2)+'" fill="#0A84FF"/><text x="50%" y="54%" font-family="Arial" font-weight="bold" font-size="'+(size*0.4)+'" fill="white" text-anchor="middle" dominant-baseline="middle">LQ</text></svg>';
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(svg);
 });
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
