@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const webpush = require('web-push');
 const http = require('http');
 const { Server } = require('socket.io');
 const { Pool } = require('pg');
@@ -10,6 +11,13 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'lumiq_secret_2024';
+
+// ═══ VAPID KEYS ═══
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC  || '';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || '';
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  webpush.setVapidDetails('mailto:admin@lumiq.app', VAPID_PUBLIC, VAPID_PRIVATE);
+}
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:egNpBttTyFpglzpNqAGOiATDXpCHAMLO@centerbeam.proxy.rlwy.net:43941/railway';
 const PORT = process.env.PORT || 3000;
 
@@ -78,6 +86,15 @@ async function initDB() {
     blocked_id INT REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(blocker_id, blocked_id)
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, endpoint)
   )`);
   await db.query(`CREATE TABLE IF NOT EXISTS friendships (
     id SERIAL PRIMARY KEY,
@@ -463,6 +480,22 @@ app.post('/api/chats/:chatId/messages', auth, async function(req, res) {
     }
 
     io.to(chatId).emit('new_message', msg);
+
+    // Push للطرف الآخر إذا غير متصل
+    var chatInfo = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]).catch(function(){return{rows:[]};});
+    if (chatInfo.rows.length) {
+      var otherId = chatInfo.rows[0].participants.find(function(p){ return String(p) !== String(req.user.id); });
+      if (otherId && !onlineUsers[String(otherId)]) {
+        var sInfo = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]).catch(function(){return{rows:[]};});
+        sendPushToUser(otherId, {
+          title: sInfo.rows[0] ? sInfo.rows[0].name : 'LUMIQ',
+          body: msg.type === 'voice' ? '🎤 رسالة صوتية' : msg.type === 'image' ? '🖼️ صورة' : (msg.text || 'رسالة جديدة'),
+          icon: '/icon-192.png', badge: '/icon-192.png',
+          tag: 'msg-' + chatId, chatId: chatId, url: '/'
+        });
+      }
+    }
+
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -895,9 +928,78 @@ app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
     var notif = r.rows[0];
     // إرسال فوري للمتصلين
     io.emit('broadcast', { id: notif.id, title: title, message: message, created_at: notif.created_at });
+
+    // إرسال Push للغير متصلين
+    var allSubs = await db.query('SELECT DISTINCT user_id FROM push_subscriptions');
+    for (var row of allSubs.rows) {
+      if (!onlineUsers[String(row.user_id)]) {
+        sendPushToUser(row.user_id, {
+          title: title,
+          body: message,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          tag: 'broadcast-' + notif.id,
+          url: '/'
+        });
+      }
+    }
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
+
+// ═══ PUSH SUBSCRIPTIONS ═══
+
+// حفظ subscription
+app.post('/api/push/subscribe', async function(req, res) {
+  try {
+    var sub = req.body;
+    var token = (req.headers.authorization || '').replace('Bearer ', '');
+    var user;
+    try { user = jwt.verify(token, JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'غير مصرح' }); }
+    await db.query(
+      'INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES ($1,$2,$3,$4) ON CONFLICT (user_id, endpoint) DO UPDATE SET p256dh=$3, auth=$4',
+      [user.id, sub.endpoint, sub.keys.p256dh, sub.keys.auth]
+    );
+    res.json({ ok: true });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+// حذف subscription
+app.post('/api/push/unsubscribe', async function(req, res) {
+  try {
+    var token = (req.headers.authorization || '').replace('Bearer ', '');
+    var user;
+    try { user = jwt.verify(token, JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'غير مصرح' }); }
+    await db.query('DELETE FROM push_subscriptions WHERE user_id=$1 AND endpoint=$2', [user.id, req.body.endpoint]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+// VAPID public key
+app.get('/api/push/vapid-key', function(req, res) {
+  res.json({ publicKey: VAPID_PUBLIC });
+});
+
+// دالة مساعدة لإرسال Push لمستخدم
+async function sendPushToUser(userId, payload) {
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return;
+  try {
+    var subs = await db.query('SELECT * FROM push_subscriptions WHERE user_id=$1', [userId]);
+    for (var sub of subs.rows) {
+      try {
+        await webpush.sendNotification(
+          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          JSON.stringify(payload)
+        );
+      } catch(e) {
+        // إذا انتهت صلاحية الـ subscription احذفها
+        if (e.statusCode === 404 || e.statusCode === 410) {
+          await db.query('DELETE FROM push_subscriptions WHERE id=$1', [sub.id]).catch(function(){});
+        }
+      }
+    }
+  } catch(e) { console.error('Push error:', e.message); }
+}
 
 // جلب الإشعارات غير المقروءة للمستخدم
 app.get('/api/notifications', auth, async function(req, res) {
@@ -1029,3 +1131,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
