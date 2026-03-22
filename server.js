@@ -870,7 +870,7 @@ app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
     var notif = r.rows[0];
     // إرسال فوري للمتصلين
     io.emit('broadcast', { id: notif.id, title: title, message: message, created_at: notif.created_at });
-    res.json({ ok: true, sent: Object.keys(require('./package.json') ? {} : {}).length });
+    res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
