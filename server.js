@@ -19,8 +19,37 @@ cloudinary.config({
   api_key: process.env.CLOUDINARY_KEY || '536977242836915',
   api_secret: process.env.CLOUDINARY_SECRET || 'kqIUC7aXQJF_s8r6kA5e_z367yA'
 });
+// ── Rate Limiter بسيط ──
+var rateLimitStore = {};
+function rateLimit(max, windowMs) {
+  return function(req, res, next) {
+    var ip = req.ip || 'x';
+    var now = Date.now();
+    if (!rateLimitStore[ip]) rateLimitStore[ip] = [];
+    rateLimitStore[ip] = rateLimitStore[ip].filter(function(t) { return now - t < windowMs; });
+    if (rateLimitStore[ip].length >= max) return res.status(429).json({ error: 'طلبات كثيرة، حاول لاحقاً' });
+    rateLimitStore[ip].push(now);
+    next();
+  };
+}
+setInterval(function() {
+  var now = Date.now();
+  Object.keys(rateLimitStore).forEach(function(ip) {
+    if (rateLimitStore[ip].every(function(t) { return now - t > 900000; })) delete rateLimitStore[ip];
+  });
+}, 300000);
 
-const db = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+// ── Sanitize ──
+function s(val) { return val ? String(val).trim() : ''; }
+
+
+const db = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000
+});
 
 async function initDB() {
   await db.query(`CREATE TABLE IF NOT EXISTS users (
@@ -65,6 +94,7 @@ async function initDB() {
 
   // أعمدة جديدة إن لم تكن موجودة
   var alters = [
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false",
@@ -105,6 +135,15 @@ async function initDB() {
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
+
+// ── Security Headers ──
+app.use(function(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
 
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
 app.options('*', cors());
@@ -150,11 +189,14 @@ function auth(req, res, next) {
 }
 
 // ═══ AUTH ═══
-app.post('/api/register', async function(req, res) {
+app.post('/api/register', rateLimit(5, 60000), async function(req, res) {
   try {
-    var name = req.body.name, username = req.body.username, email = req.body.email, password = req.body.password;
+    var name = s(req.body.name), username = s(req.body.username).toLowerCase(), email = s(req.body.email).toLowerCase(), password = s(req.body.password);
     if (!name || !username || !email || !password) return res.status(400).json({ error: 'جميع الحقول مطلوبة' });
     if (password.length < 6) return res.status(400).json({ error: 'كلمة المرور 6 أحرف على الأقل' });
+    if (name.length > 40) return res.status(400).json({ error: 'الاسم طويل جداً' });
+    if (username.length > 20 || !/^[a-z0-9_]+$/.test(username)) return res.status(400).json({ error: 'اسم المستخدم غير صالح' });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'البريد غير صالح' });
     var exists = await db.query('SELECT id FROM users WHERE username=$1 OR email=$2', [username.toLowerCase(), email.toLowerCase()]);
     if (exists.rows.length) return res.status(400).json({ error: 'اسم المستخدم أو البريد مستخدم' });
     var hash = await bcrypt.hash(password, 10);
@@ -168,10 +210,11 @@ app.post('/api/register', async function(req, res) {
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ في الخادم' }); }
 });
 
-app.post('/api/login', async function(req, res) {
+app.post('/api/login', rateLimit(10, 60000), async function(req, res) {
   try {
-    var email = req.body.email, password = req.body.password;
-    var result = await db.query('SELECT * FROM users WHERE email=$1', [email.toLowerCase()]);
+    var email = s(req.body.email).toLowerCase(), password = s(req.body.password);
+    if (!email || !password) return res.status(400).json({ error: 'البريد وكلمة المرور مطلوبان' });
+    var result = await db.query('SELECT * FROM users WHERE email=$1', [email]);
     var user = result.rows[0];
     if (!user) return res.status(400).json({ error: 'البريد غير موجود' });
     if (user.is_banned) return res.status(403).json({ error: 'تم حظر حسابك' });
@@ -446,9 +489,11 @@ app.post('/api/chats/:chatId/messages', auth, async function(req, res) {
     }
 
     var forwarded = req.body.forwarded === true;
+    var expires_sec = req.body.expires_after ? parseInt(req.body.expires_after) : null;
+    var expires_at = expires_sec ? new Date(Date.now() + expires_sec * 1000).toISOString() : null;
     var r = await db.query(
-      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,forwarded) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-      [chatId, req.user.id, 'text', text ? text.trim() : null, reply_to ? JSON.stringify(reply_to) : null, forwarded]
+      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,forwarded,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+      [chatId, req.user.id, 'text', text ? text.trim() : null, reply_to ? JSON.stringify(reply_to) : null, forwarded, expires_at]
     );
     var msg = r.rows[0];
 
@@ -918,7 +963,31 @@ initDB().then(function() {
   server.listen(PORT, function() {
     console.log('🚀 LUMIQ Server running on port ' + PORT);
   });
+
+  // ══ حذف الرسائل المؤقتة المنتهية كل دقيقة ══
+  setInterval(async function() {
+    try {
+      var expired = await db.query(
+        "SELECT id, chat_id FROM messages WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+      );
+      if (expired.rows.length === 0) return;
+      var ids = expired.rows.map(function(r) { return r.id; });
+      await db.query('DELETE FROM messages WHERE id = ANY($1)', [ids]);
+      var chatGroups = {};
+      expired.rows.forEach(function(r) {
+        if (!chatGroups[r.chat_id]) chatGroups[r.chat_id] = [];
+        chatGroups[r.chat_id].push(r.id);
+      });
+      Object.keys(chatGroups).forEach(function(cid) {
+        chatGroups[cid].forEach(function(mid) {
+          io.to(cid).emit('delete_message', { msg_id: mid });
+        });
+      });
+    } catch(e) { console.error('Cleanup error:', e.message); }
+  }, 30000);
+
 }).catch(function(e) {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
