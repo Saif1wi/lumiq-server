@@ -907,7 +907,7 @@ io.on('connection', function(socket) {
 
   socket.on('typing', function(data) {
     if (data && data.chat_id) {
-      socket.to(data.chat_id).emit('typing', { user_id: data.user_id, is_typing: data.is_typing });
+      socket.to(data.chat_id).emit('typing', { chat_id: data.chat_id, user_id: data.user_id, is_typing: !!data.is_typing });
     }
   });
 
