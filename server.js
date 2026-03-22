@@ -959,6 +959,59 @@ io.on('connection', function(socket) {
   });
 });
 
+
+
+// ══ ADMIN: Remove block ══
+app.delete('/api/admin/blocks', adminAuth, async function(req, res) {
+  try {
+    var blocker = req.query.blocker, blocked = req.query.blocked;
+    if (!blocker || !blocked) return res.status(400).json({ error: 'مطلوب blocker و blocked' });
+    await db.query('DELETE FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [blocker, blocked]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══ ADMIN: Notifications list ══
+app.get('/api/admin/notifications', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══ ADMIN: Blocks list ══
+app.get('/api/admin/blocks', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT b.*, u1.name as blocker_name, u1.username as blocker_username, u2.name as blocked_name, u2.username as blocked_username FROM blocks b JOIN users u1 ON b.blocker_id=u1.id JOIN users u2 ON b.blocked_id=u2.id ORDER BY b.id DESC LIMIT 200'
+    );
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══ ADMIN: Friends list ══
+app.get('/api/admin/friends', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT f.*, u1.name as requester_name, u1.username as requester_username, u2.name as addressee_name, u2.username as addressee_username FROM friendships f JOIN users u1 ON f.requester_id=u1.id JOIN users u2 ON f.addressee_id=u2.id ORDER BY f.id DESC LIMIT 200'
+    );
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══ ADMIN: Online count ══
+app.get('/api/admin/online', adminAuth, function(req, res) {
+  res.json({ count: Object.keys(onlineUsers).length, users: Object.keys(onlineUsers) });
+});
+
+// ══ ADMIN: Delete notification ══
+app.delete('/api/admin/notifications/:id', adminAuth, async function(req, res) {
+  try {
+    await db.query('DELETE FROM notifications WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 initDB().then(function() {
   server.listen(PORT, function() {
     console.log('🚀 LUMIQ Server running on port ' + PORT);
