@@ -118,6 +118,8 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT DEFAULT ''",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS battery_level INT DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_battery BOOLEAN DEFAULT true",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false"
   ];
   for (var i = 0; i < alters.length; i++) {
@@ -322,7 +324,7 @@ app.post('/api/login', rateLimit(10, 60000), async function(req, res) {
 // ═══ USERS ═══
 app.get('/api/me', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
+    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [req.user.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     res.json(r.rows[0]);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
@@ -337,6 +339,7 @@ app.put('/api/me', auth, async function(req, res) {
     var show_last_seen  = req.body.show_last_seen !== undefined ? req.body.show_last_seen : null;
     var show_online     = req.body.show_online    !== undefined ? req.body.show_online    : null;
     var show_join_date  = req.body.show_join_date !== undefined ? req.body.show_join_date : null;
+    var show_battery    = req.body.show_battery   !== undefined ? req.body.show_battery   : null;
 
     if (username) {
       username = username.toLowerCase().replace(/[^a-z0-9_]/g, '');
@@ -347,10 +350,10 @@ app.put('/api/me', auth, async function(req, res) {
     if (nickname && nickname.length > 30) return res.status(400).json({ error: 'الكنية طويلة جداً' });
 
     await db.query(
-      'UPDATE users SET name=COALESCE($1,name), username=COALESCE($2,username), bio=COALESCE($3,bio), nickname=COALESCE($4,nickname), show_last_seen=COALESCE($5,show_last_seen), show_online=COALESCE($6,show_online), show_join_date=COALESCE($7,show_join_date) WHERE id=$8',
-      [name, username, bio, nickname, show_last_seen, show_online, show_join_date, req.user.id]
+      'UPDATE users SET name=COALESCE($1,name), username=COALESCE($2,username), bio=COALESCE($3,bio), nickname=COALESCE($4,nickname), show_last_seen=COALESCE($5,show_last_seen), show_online=COALESCE($6,show_online), show_join_date=COALESCE($7,show_join_date), show_battery=COALESCE($8,show_battery) WHERE id=$9',
+      [name, username, bio, nickname, show_last_seen, show_online, show_join_date, show_battery, req.user.id]
     );
-    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
+    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [req.user.id]);
     res.json(r.rows[0]);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -373,7 +376,7 @@ app.get('/api/users/search', auth, async function(req, res) {
     var q = req.query.q ? req.query.q.toLowerCase().trim() : '';
     if (!q || q.length < 2) return res.json([]);
     var r = await db.query(
-      'SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE (username ILIKE $1 OR name ILIKE $1) AND id!=$2 AND is_banned=false LIMIT 20',
+      'SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE (username ILIKE $1 OR name ILIKE $1) AND id!=$2 AND is_banned=false LIMIT 20',
       ['%' + q + '%', req.user.id]
     );
     res.json(r.rows);
@@ -382,7 +385,7 @@ app.get('/api/users/search', auth, async function(req, res) {
 
 app.get('/api/users/:id', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
+    var r = await db.query('SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     var user = Object.assign({}, r.rows[0]);
     // إذا هو حظرني → أخفِ بياناته
@@ -496,7 +499,7 @@ app.post('/api/friends/reject', auth, async function(req, res) {
 app.get('/api/friends', auth, async function(req, res) {
   try {
     var r = await db.query(
-      'SELECT u.id,u.name,u.username,u.photo_url,u.is_online,u.is_verified,u.last_seen,u.show_online,u.show_last_seen, f.status, f.requester_id FROM friendships f JOIN users u ON (CASE WHEN f.requester_id=$1 THEN f.addressee_id ELSE f.requester_id END)=u.id WHERE (f.requester_id=$1 OR f.addressee_id=$1) ORDER BY f.created_at DESC',
+      'SELECT u.id,u.name,u.username,u.photo_url,u.is_online,u.is_verified,u.last_seen,u.show_online,u.show_last_seen,u.battery_level,u.show_battery, f.status, f.requester_id FROM friendships f JOIN users u ON (CASE WHEN f.requester_id=$1 THEN f.addressee_id ELSE f.requester_id END)=u.id WHERE (f.requester_id=$1 OR f.addressee_id=$1) ORDER BY f.created_at DESC',
       [req.user.id]
     );
     res.json(r.rows);
@@ -1115,6 +1118,16 @@ io.on('connection', function(socket) {
   });
 
 
+  // ── تحديث البطارية ──
+  socket.on('battery_update', async function(data) {
+    if (!socket.userId || data.level === undefined) return;
+    var level = Math.round(Math.max(0, Math.min(100, Number(data.level))));
+    try {
+      await db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]);
+      socket.broadcast.emit('battery_changed', { user_id: socket.userId, level: level });
+    } catch(e) {}
+  });
+
   socket.on('viewing_chat', function(data) {
     if (!data || !data.chat_id) return;
     socket.to(data.chat_id).emit('partner_viewing', {
@@ -1244,4 +1257,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
