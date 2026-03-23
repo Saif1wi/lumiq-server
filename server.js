@@ -1103,7 +1103,18 @@ io.on('connection', function(socket) {
     if (data && data.chat_id) socket.join(data.chat_id);
   });
 
-  // ── يشاهد المحادثة الآن ──
+  // ── يستمع لرسالة صوتية ──
+  socket.on('listening_voice', function(data) {
+    if (!data || !data.chat_id) return;
+    socket.to(data.chat_id).emit('partner_listening', {
+      user_id:    socket.userId,
+      chat_id:    data.chat_id,
+      is_listening: !!data.is_listening,
+      msg_id:     data.msg_id || null
+    });
+  });
+
+
   socket.on('viewing_chat', function(data) {
     if (!data || !data.chat_id) return;
     socket.to(data.chat_id).emit('partner_viewing', {
