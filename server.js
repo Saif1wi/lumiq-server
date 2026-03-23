@@ -1103,6 +1103,16 @@ io.on('connection', function(socket) {
     if (data && data.chat_id) socket.join(data.chat_id);
   });
 
+  // ── يشاهد المحادثة الآن ──
+  socket.on('viewing_chat', function(data) {
+    if (!data || !data.chat_id) return;
+    socket.to(data.chat_id).emit('partner_viewing', {
+      user_id:   socket.userId,
+      chat_id:   data.chat_id,
+      is_viewing: !!data.is_viewing
+    });
+  });
+
   socket.on('typing', function(data) {
     if (data && data.chat_id) {
       socket.to(data.chat_id).emit('typing', {
