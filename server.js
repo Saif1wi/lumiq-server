@@ -1107,9 +1107,10 @@ io.on('connection', function(socket) {
   socket.on('viewing_chat', function(data) {
     if (!data || !data.chat_id) return;
     socket.to(data.chat_id).emit('partner_viewing', {
-      user_id:   socket.userId,
-      chat_id:   data.chat_id,
-      is_viewing: !!data.is_viewing
+      user_id:    socket.userId,
+      chat_id:    data.chat_id,
+      is_viewing: !!data.is_viewing,
+      _reply:     !!data._reply
     });
   });
 
