@@ -120,7 +120,8 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT DEFAULT ''",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS battery_level INT DEFAULT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_battery BOOLEAN DEFAULT true",
-    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false"
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
+    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
@@ -764,11 +765,13 @@ app.post('/api/messages/:id/react', auth, async function(req, res) {
 app.post('/api/chats/:chatId/read', auth, async function(req, res) {
   try {
     await db.query('UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false', [req.params.chatId, req.user.id]);
-    var chatRow = await db.query('SELECT unread_count FROM chats WHERE id=$1', [req.params.chatId]);
+    var chatRow = await db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [req.params.chatId]);
     if (chatRow.rows.length) {
       var uc = chatRow.rows[0].unread_count || {};
       uc[String(req.user.id)] = 0;
-      await db.query('UPDATE chats SET unread_count=$1 WHERE id=$2', [JSON.stringify(uc), req.params.chatId]);
+      var ra = chatRow.rows[0].read_at || {};
+      ra[String(req.user.id)] = new Date().toISOString();
+      await db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3', [JSON.stringify(uc), JSON.stringify(ra), req.params.chatId]);
     }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
@@ -1149,10 +1152,12 @@ io.on('connection', function(socket) {
   });
 
   socket.on('messages_seen', function(data) {
+    var now = new Date().toISOString();
     if (data.partner_id && onlineUsers[String(data.partner_id)]) {
       io.to(onlineUsers[String(data.partner_id)]).emit('messages_seen', {
         chat_id:   data.chat_id,
-        reader_id: data.reader_id
+        reader_id: data.reader_id,
+        read_at:   now
       });
     }
   });
@@ -1257,3 +1262,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
