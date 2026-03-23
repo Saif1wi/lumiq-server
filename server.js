@@ -933,17 +933,48 @@ io.on('connection', function(socket) {
         return;
       }
       var to = onlineUsers[String(data.to_user_id)];
-      if (to) io.to(to).emit('call_incoming', { from_user: data.from_user, chat_id: data.chat_id, socket_id: socket.id });
+      if (to) io.to(to).emit('call_incoming', {
+        from_user_id: data.from_user ? data.from_user.id : socket.userId,
+        from_name: data.from_user ? data.from_user.name : 'مجهول',
+        from_photo: data.from_user ? data.from_user.photo_url : null,
+        from_user: data.from_user,
+        chat_id: data.chat_id,
+        socket_id: socket.id
+      });
       else socket.emit('call_failed', { reason: 'المستخدم غير متصل حالياً' });
     } catch(e) {
       var to2 = onlineUsers[String(data.to_user_id)];
-      if (to2) io.to(to2).emit('call_incoming', { from_user: data.from_user, chat_id: data.chat_id, socket_id: socket.id });
+      if (to2) io.to(to2).emit('call_incoming', {
+        from_user_id: data.from_user ? data.from_user.id : socket.userId,
+        from_name: data.from_user ? data.from_user.name : 'مجهول',
+        from_photo: data.from_user ? data.from_user.photo_url : null,
+        from_user: data.from_user,
+        chat_id: data.chat_id,
+        socket_id: socket.id
+      });
     }
   });
 
-  socket.on('call_accept',   function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('call_accepted',  { from_user: d.from_user, socket_id: socket.id }); });
-  socket.on('call_reject',   function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('call_rejected'); });
-  socket.on('call_end',      function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('call_ended'); });
+  socket.on('call_accept', function(d) {
+    if (d.to_socket_id) {
+      io.to(d.to_socket_id).emit('call_accepted', {
+        from_user: d.from_user,
+        socket_id: socket.id  // socket_id المتلقي للـ WebRTC
+      });
+    }
+  });
+  socket.on('call_reject', function(d) {
+    if (d.to_socket_id) io.to(d.to_socket_id).emit('call_rejected', { reason: d.reason || 'rejected' });
+    else if (d.to_user_id && onlineUsers[String(d.to_user_id)]) {
+      io.to(onlineUsers[String(d.to_user_id)]).emit('call_rejected', { reason: d.reason || 'rejected' });
+    }
+  });
+  socket.on('call_end', function(d) {
+    if (d.to_socket_id) io.to(d.to_socket_id).emit('call_ended');
+    else if (d.to_user_id && onlineUsers[String(d.to_user_id)]) {
+      io.to(onlineUsers[String(d.to_user_id)]).emit('call_ended');
+    }
+  });
   socket.on('webrtc_offer',  function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_offer',  { offer: d.offer, from_socket_id: socket.id }); });
   socket.on('webrtc_answer', function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
