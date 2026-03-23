@@ -117,6 +117,7 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_reason TEXT DEFAULT ''",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false"
   ];
   for (var i = 0; i < alters.length; i++) {
@@ -830,11 +831,10 @@ app.get('/api/admin/users', adminAuth, async function(req, res) {
     var page   = parseInt(req.query.page) || 1;
     var search = req.query.search ? '%' + req.query.search + '%' : '%';
     var r      = await db.query(
-      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at FROM users WHERE username ILIKE $1 OR name ILIKE $1 ORDER BY created_at DESC LIMIT 20 OFFSET $2',
-      [search, (page-1)*20]
+      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
+      [search, (page-1)*50]
     );
-    var total = await db.query('SELECT COUNT(*) as c FROM users WHERE username ILIKE $1 OR name ILIKE $1', [search]);
-    res.json({ users: r.rows, total: parseInt(total.rows[0].c), page });
+    res.json(r.rows); // FIX: array مباشرة
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -873,15 +873,15 @@ app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// FIX: messages يُرجع image_url + audio_url + sender_photo + type filter
 app.get('/api/admin/messages', adminAuth, async function(req, res) {
   try {
-    var page = parseInt(req.query.page) || 1;
-    var r    = await db.query(
-      'SELECT m.id,m.text,m.type,m.created_at,u.name as sender_name,u.username FROM messages m JOIN users u ON m.sender_id=u.id ORDER BY m.created_at DESC LIMIT 30 OFFSET $1',
-      [(page-1)*30]
-    );
-    var total = await db.query('SELECT COUNT(*) as c FROM messages');
-    res.json({ messages: r.rows, total: parseInt(total.rows[0].c) });
+    var type  = req.query.type || null;
+    var query = type
+      ? 'SELECT m.id,m.text,m.type,m.image_url,m.audio_url,m.duration,m.created_at,u.name as sender_name,u.username as sender_username,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type=$1 ORDER BY m.created_at DESC LIMIT 50'
+      : 'SELECT m.id,m.text,m.type,m.image_url,m.audio_url,m.duration,m.created_at,u.name as sender_name,u.username as sender_username,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id ORDER BY m.created_at DESC LIMIT 50';
+    var r = type ? await db.query(query, [type]) : await db.query(query);
+    res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -889,7 +889,6 @@ app.delete('/api/admin/messages/:id', adminAuth, async function(req, res) {
   try {
     var r = await db.query('SELECT chat_id FROM messages WHERE id=$1', [req.params.id]);
     await db.query('DELETE FROM messages WHERE id=$1', [req.params.id]);
-    // FIX: إرسال id ليتوافق مع الـ frontend
     if (r.rows.length) io.to(r.rows[0].chat_id).emit('delete_message', { id: parseInt(req.params.id) });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -899,21 +898,38 @@ app.get('/api/admin/images', adminAuth, async function(req, res) {
   try {
     var page = parseInt(req.query.page) || 1;
     var r    = await db.query(
-      "SELECT m.id,m.image_url,m.created_at,u.name as sender_name FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type='image' ORDER BY m.created_at DESC LIMIT 20 OFFSET $1",
+      "SELECT m.id,m.image_url,m.created_at,u.name as sender_name,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type='image' ORDER BY m.created_at DESC LIMIT 20 OFFSET $1",
       [(page-1)*20]
     );
-    var total = await db.query("SELECT COUNT(*) as c FROM messages WHERE type='image'");
-    res.json({ images: r.rows, total: parseInt(total.rows[0].c) });
+    res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// FIX: PUT users يدعم is_banned + is_verified + ban_reason
 app.put('/api/admin/users/:id', adminAuth, async function(req, res) {
   try {
-    var { name, username, email, bio } = req.body;
-    await db.query(
-      'UPDATE users SET name=COALESCE($1,name), username=COALESCE($2,username), email=COALESCE($3,email), bio=COALESCE($4,bio) WHERE id=$5',
-      [name||null, username||null, email||null, bio||null, req.params.id]
-    );
+    var b = req.body;
+    var updates = [];
+    var vals    = [];
+    var i       = 1;
+    if (b.name       !== undefined) { updates.push('name=$'       + i++); vals.push(b.name); }
+    if (b.username   !== undefined) { updates.push('username=$'   + i++); vals.push(b.username); }
+    if (b.email      !== undefined) { updates.push('email=$'      + i++); vals.push(b.email); }
+    if (b.bio        !== undefined) { updates.push('bio=$'        + i++); vals.push(b.bio); }
+    if (b.is_banned  !== undefined) { updates.push('is_banned=$'  + i++); vals.push(b.is_banned);
+      if (b.is_banned && onlineUsers[String(req.params.id)]) {
+        io.to(onlineUsers[String(req.params.id)]).emit('force_logout', { type: 'ban', reason: b.ban_reason || 'تم حظرك' });
+      }
+    }
+    if (b.ban_reason !== undefined) { updates.push('ban_reason=$' + i++); vals.push(b.ban_reason); }
+    if (b.is_verified!== undefined) { updates.push('is_verified=$'+ i++); vals.push(b.is_verified);
+      if (onlineUsers[String(req.params.id)]) {
+        io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: b.is_verified });
+      }
+    }
+    if (!updates.length) return res.json({ ok: true });
+    vals.push(req.params.id);
+    await db.query('UPDATE users SET ' + updates.join(',') + ' WHERE id=$' + i, vals);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -936,22 +952,38 @@ app.delete('/api/admin/chats/:id', adminAuth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// FIX: chats يُرجع أسماء وصور المستخدمين
 app.get('/api/admin/chats', adminAuth, async function(req, res) {
   try {
-    var page  = parseInt(req.query.page) || 1;
-    var r     = await db.query(
-      'SELECT c.id,c.participants,c.last_message,c.last_message_at,(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) as msg_count FROM chats c ORDER BY c.last_message_at DESC LIMIT 20 OFFSET $1',
-      [(page-1)*20]
+    var r = await db.query(
+      'SELECT c.id,c.participants,c.last_message,c.last_message_at,(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) as msg_count FROM chats c ORDER BY c.last_message_at DESC NULLS LAST LIMIT 50'
     );
-    var total = await db.query('SELECT COUNT(*) as c FROM chats');
-    res.json({ chats: r.rows, total: parseInt(total.rows[0].c) });
+    var chats = r.rows;
+    // جلب بيانات المستخدمين لكل محادثة
+    var allIds = [];
+    chats.forEach(function(c) { if (c.participants) c.participants.forEach(function(p) { if (!allIds.includes(String(p))) allIds.push(String(p)); }); });
+    var usersMap = {};
+    if (allIds.length) {
+      var uRes = await db.query('SELECT id,name,username,photo_url FROM users WHERE id=ANY($1::int[])', [allIds]);
+      uRes.rows.forEach(function(u) { usersMap[String(u.id)] = u; });
+    }
+    chats = chats.map(function(c) {
+      var parts = c.participants || [];
+      var u1 = usersMap[String(parts[0])] || {};
+      var u2 = usersMap[String(parts[1])] || {};
+      return Object.assign({}, c, {
+        user1_name: u1.name, user1_photo: u1.photo_url,
+        user2_name: u2.name, user2_photo: u2.photo_url
+      });
+    });
+    res.json(chats);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/admin/chats/:id/messages', adminAuth, async function(req, res) {
   try {
     var r = await db.query(
-      'SELECT m.*,u.name as sender_name,u.username FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.chat_id=$1 ORDER BY m.created_at DESC LIMIT 50',
+      'SELECT m.*,u.name as sender_name,u.username,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.chat_id=$1 ORDER BY m.created_at DESC LIMIT 50',
       [req.params.id]
     );
     res.json(r.rows);
@@ -1002,7 +1034,7 @@ app.delete('/api/admin/notifications/:id', adminAuth, async function(req, res) {
 app.get('/api/admin/blocks', adminAuth, async function(req, res) {
   try {
     var r = await db.query(
-      'SELECT b.*,u1.name as blocker_name,u1.username as blocker_username,u2.name as blocked_name,u2.username as blocked_username FROM blocks b JOIN users u1 ON b.blocker_id=u1.id JOIN users u2 ON b.blocked_id=u2.id ORDER BY b.id DESC LIMIT 200'
+      'SELECT b.*,u1.name as blocker_name,u1.username as blocker_username,u1.photo_url as blocker_photo,u2.name as blocked_name,u2.username as blocked_username,u2.photo_url as blocked_photo FROM blocks b JOIN users u1 ON b.blocker_id=u1.id JOIN users u2 ON b.blocked_id=u2.id ORDER BY b.id DESC LIMIT 200'
     );
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1020,7 +1052,7 @@ app.delete('/api/admin/blocks', adminAuth, async function(req, res) {
 app.get('/api/admin/friends', adminAuth, async function(req, res) {
   try {
     var r = await db.query(
-      'SELECT f.*,u1.name as requester_name,u1.username as requester_username,u2.name as addressee_name,u2.username as addressee_username FROM friendships f JOIN users u1 ON f.requester_id=u1.id JOIN users u2 ON f.addressee_id=u2.id ORDER BY f.id DESC LIMIT 200'
+      'SELECT f.*,u1.name as requester_name,u1.username as requester_username,u1.photo_url as requester_photo,u2.name as addressee_name,u2.username as addressee_username,u2.photo_url as addressee_photo FROM friendships f JOIN users u1 ON f.requester_id=u1.id JOIN users u2 ON f.addressee_id=u2.id ORDER BY f.id DESC LIMIT 200'
     );
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
