@@ -616,9 +616,13 @@ app.post('/api/chats/:chatId/messages/image', auth, upload.single('image'), asyn
       transformation: [{ quality: 'auto', fetch_format: 'auto' }]
     });
 
+    // FIX 4: قبول reply_to مع الصورة
+    var reply_to = req.body.reply_to || null;
+    if (reply_to && typeof reply_to === 'string') { try { reply_to = JSON.parse(reply_to); } catch(e) { reply_to = null; } }
+
     var r   = await db.query(
-      'INSERT INTO messages (chat_id,sender_id,type,image_url,text) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [chatId, req.user.id, 'image', up.secure_url, 'صورة']
+      'INSERT INTO messages (chat_id,sender_id,type,image_url,text,reply_to) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [chatId, req.user.id, 'image', up.secure_url, 'صورة', reply_to ? JSON.stringify(reply_to) : null]
     );
     var msg = r.rows[0];
 
@@ -646,9 +650,13 @@ app.post('/api/chats/:chatId/messages/audio', auth, upload.single('audio'), asyn
       resource_type: 'video'
     });
 
+    // FIX 4: قبول reply_to مع الصوت
+    var reply_to = req.body.reply_to || null;
+    if (reply_to && typeof reply_to === 'string') { try { reply_to = JSON.parse(reply_to); } catch(e) { reply_to = null; } }
+
     var r   = await db.query(
-      'INSERT INTO messages (chat_id,sender_id,type,audio_url,duration,text) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-      [chatId, req.user.id, 'voice', up.secure_url, duration, 'رسالة صوتية']
+      'INSERT INTO messages (chat_id,sender_id,type,audio_url,duration,text,reply_to) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+      [chatId, req.user.id, 'voice', up.secure_url, duration, 'رسالة صوتية', reply_to ? JSON.stringify(reply_to) : null]
     );
     var msg = r.rows[0];
 
