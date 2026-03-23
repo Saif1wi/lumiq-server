@@ -116,6 +116,7 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_join_date BOOLEAN DEFAULT true",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT DEFAULT ''",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false"
   ];
   for (var i = 0; i < alters.length; i++) {
@@ -320,7 +321,7 @@ app.post('/api/login', rateLimit(10, 60000), async function(req, res) {
 // ═══ USERS ═══
 app.get('/api/me', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id,name,username,email,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
+    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     res.json(r.rows[0]);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
@@ -330,6 +331,7 @@ app.put('/api/me', auth, async function(req, res) {
   try {
     var name            = req.body.name    || null;
     var bio             = req.body.bio     !== undefined ? req.body.bio    : null;
+    var nickname        = req.body.nickname !== undefined ? req.body.nickname : null;
     var username        = req.body.username || null;
     var show_last_seen  = req.body.show_last_seen !== undefined ? req.body.show_last_seen : null;
     var show_online     = req.body.show_online    !== undefined ? req.body.show_online    : null;
@@ -341,12 +343,13 @@ app.put('/api/me', auth, async function(req, res) {
       var ex = await db.query('SELECT id FROM users WHERE username=$1 AND id!=$2', [username, req.user.id]);
       if (ex.rows.length) return res.status(400).json({ error: 'اسم المستخدم مستخدم' });
     }
+    if (nickname && nickname.length > 30) return res.status(400).json({ error: 'الكنية طويلة جداً' });
 
     await db.query(
-      'UPDATE users SET name=COALESCE($1,name), username=COALESCE($2,username), bio=COALESCE($3,bio), show_last_seen=COALESCE($4,show_last_seen), show_online=COALESCE($5,show_online), show_join_date=COALESCE($6,show_join_date) WHERE id=$7',
-      [name, username, bio, show_last_seen, show_online, show_join_date, req.user.id]
+      'UPDATE users SET name=COALESCE($1,name), username=COALESCE($2,username), bio=COALESCE($3,bio), nickname=COALESCE($4,nickname), show_last_seen=COALESCE($5,show_last_seen), show_online=COALESCE($6,show_online), show_join_date=COALESCE($7,show_join_date) WHERE id=$8',
+      [name, username, bio, nickname, show_last_seen, show_online, show_join_date, req.user.id]
     );
-    var r = await db.query('SELECT id,name,username,email,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
+    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.user.id]);
     res.json(r.rows[0]);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -369,7 +372,7 @@ app.get('/api/users/search', auth, async function(req, res) {
     var q = req.query.q ? req.query.q.toLowerCase().trim() : '';
     if (!q || q.length < 2) return res.json([]);
     var r = await db.query(
-      'SELECT id,name,username,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE (username ILIKE $1 OR name ILIKE $1) AND id!=$2 AND is_banned=false LIMIT 20',
+      'SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE (username ILIKE $1 OR name ILIKE $1) AND id!=$2 AND is_banned=false LIMIT 20',
       ['%' + q + '%', req.user.id]
     );
     res.json(r.rows);
@@ -378,7 +381,7 @@ app.get('/api/users/search', auth, async function(req, res) {
 
 app.get('/api/users/:id', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id,name,username,bio,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
+    var r = await db.query('SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,created_at FROM users WHERE id=$1', [req.params.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     var user = Object.assign({}, r.rows[0]);
     // إذا هو حظرني → أخفِ بياناته
