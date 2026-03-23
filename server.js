@@ -658,6 +658,54 @@ app.post('/api/chats/:chatId/messages/audio', auth, upload.single('audio'), asyn
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
+// ═══ FORWARD — يقبل URL مباشرة بدون re-upload ═══
+app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
+  try {
+    var chatId    = req.params.chatId;
+    var type      = req.body.type || 'text';
+    var audio_url = req.body.audio_url || null;
+    var image_url = req.body.image_url || null;
+    var text      = req.body.text     || null;
+    var duration  = parseInt(req.body.duration) || 0;
+
+    // التحقق من الحظر
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    if (chatRow.rows.length) {
+      var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+      if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
+    }
+
+    var r, msg, lastMsg;
+    if (type === 'voice' && audio_url) {
+      r = await db.query(
+        'INSERT INTO messages (chat_id,sender_id,type,audio_url,duration,text,forwarded) VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING *',
+        [chatId, req.user.id, 'voice', audio_url, duration, 'رسالة صوتية']
+      );
+      msg = r.rows[0];
+      lastMsg = '🎤 رسالة صوتية';
+    } else if (type === 'image' && image_url) {
+      r = await db.query(
+        'INSERT INTO messages (chat_id,sender_id,type,image_url,text,forwarded) VALUES ($1,$2,$3,$4,$5,true) RETURNING *',
+        [chatId, req.user.id, 'image', image_url, 'صورة']
+      );
+      msg = r.rows[0];
+      lastMsg = 'صورة 🖼️';
+    } else {
+      if (!text || !text.trim()) return res.status(400).json({ error: 'بيانات ناقصة' });
+      r = await db.query(
+        'INSERT INTO messages (chat_id,sender_id,type,text,forwarded) VALUES ($1,$2,$3,$4,true) RETURNING *',
+        [chatId, req.user.id, 'text', text.trim()]
+      );
+      msg = r.rows[0];
+      lastMsg = text.trim();
+    }
+
+    await updateChatMeta(chatId, req.user.id, lastMsg);
+    io.to(chatId).emit('new_message', msg);
+    res.json(msg);
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
 app.put('/api/messages/:id', auth, async function(req, res) {
   try {
     var text  = req.body.text;
