@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express  = require('express');
 const http     = require('http');
 const { Server } = require('socket.io');
@@ -9,15 +10,19 @@ const multer     = require('multer');
 const cloudinary = require('cloudinary').v2;
 
 // ═══ CONFIG ═══
-const JWT_SECRET    = process.env.JWT_SECRET    || 'lumiq_secret_2024';
-const DATABASE_URL  = process.env.DATABASE_URL  || 'postgresql://postgres:egNpBttTyFpglzpNqAGOiATDXpCHAMLO@centerbeam.proxy.rlwy.net:43941/railway';
-const ADMIN_KEY     = process.env.ADMIN_KEY     || 'saif11';
-const PORT          = process.env.PORT          || 3000;
+const JWT_SECRET   = process.env.JWT_SECRET;
+const DATABASE_URL = process.env.DATABASE_URL;
+const ADMIN_KEY    = process.env.ADMIN_KEY;
+const PORT         = process.env.PORT || 3000;
+
+if (!JWT_SECRET)   throw new Error('JWT_SECRET env variable is required');
+if (!DATABASE_URL) throw new Error('DATABASE_URL env variable is required');
+if (!ADMIN_KEY)    throw new Error('ADMIN_KEY env variable is required');
 
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD  || 'dxahljm5o',
-  api_key:    process.env.CLOUDINARY_KEY    || '536977242836915',
-  api_secret: process.env.CLOUDINARY_SECRET || 'kqIUC7aXQJF_s8r6kA5e_z367yA'
+  cloud_name: process.env.CLOUDINARY_CLOUD  || '',
+  api_key:    process.env.CLOUDINARY_KEY    || '',
+  api_secret: process.env.CLOUDINARY_SECRET || ''
 });
 
 // ═══ DB ═══
@@ -302,13 +307,13 @@ app.post('/api/register', rateLimit(5, 60000), async function(req, res) {
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ في الخادم' }); }
 });
 
-app.post('/api/login', rateLimit(10, 60000), async function(req, res) {
+app.post('/api/login', rateLimit(5, 60000), async function(req, res) {
   try {
     var email    = s(req.body.email).toLowerCase();
     var password = s(req.body.password);
     if (!email || !password) return res.status(400).json({ error: 'البريد وكلمة المرور مطلوبان' });
 
-    var result = await db.query('SELECT * FROM users WHERE email=$1', [email]);
+    var result = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at,is_banned,password FROM users WHERE email=$1', [email]);
     var user   = result.rows[0];
     if (!user)          return res.status(400).json({ error: 'البريد غير موجود' });
     if (user.is_banned) return res.status(403).json({ error: 'تم حظر حسابك' });
@@ -334,10 +339,10 @@ app.get('/api/me', auth, async function(req, res) {
 
 app.put('/api/me', auth, async function(req, res) {
   try {
-    var name            = req.body.name    || null;
-    var bio             = req.body.bio     !== undefined ? req.body.bio    : null;
-    var nickname        = req.body.nickname !== undefined ? req.body.nickname : null;
-    var username        = req.body.username || null;
+    var name            = s(req.body.name)    || null;
+    var bio             = req.body.bio     !== undefined ? s(req.body.bio)    : null;
+    var nickname        = req.body.nickname !== undefined ? s(req.body.nickname) : null;
+    var username        = s(req.body.username) || null;
     var show_last_seen  = req.body.show_last_seen !== undefined ? req.body.show_last_seen : null;
     var show_online     = req.body.show_online    !== undefined ? req.body.show_online    : null;
     var show_join_date  = req.body.show_join_date !== undefined ? req.body.show_join_date : null;
@@ -360,7 +365,7 @@ app.put('/api/me', auth, async function(req, res) {
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.post('/api/me/avatar', auth, upload.single('avatar'), async function(req, res) {
+app.post('/api/me/avatar', auth, rateLimit(10, 60000), upload.single('avatar'), async function(req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
     var b64 = req.file.buffer.toString('base64');
@@ -387,7 +392,9 @@ app.get('/api/users/search', auth, async function(req, res) {
 
 app.get('/api/users/:id', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [req.params.id]);
+    var uid = parseInt(req.params.id);
+    if (isNaN(uid)) return res.status(400).json({ error: 'معرف غير صالح' });
+    var r = await db.query('SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [uid]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     var user = Object.assign({}, r.rows[0]);
     // إذا هو حظرني → أخفِ بياناته
@@ -417,10 +424,8 @@ app.delete('/api/me', auth, async function(req, res) {
 app.post('/api/block', auth, rateLimit(20, 60000), async function(req, res) {
   try {
     var targetId = parseInt(req.body.user_id);
-    if (isNaN(targetId)) return res.status(400).json({ error: 'معرف غير صالح' });
+    if (isNaN(targetId) || !targetId) return res.status(400).json({ error: 'معرف غير صالح' });
     if (targetId === req.user.id) return res.status(400).json({ error: 'لا يمكنك حظر نفسك' });
-    var targetId = parseInt(req.body.user_id);
-    if (!targetId || targetId === req.user.id) return res.status(400).json({ error: 'غير صالح' });
     await db.query('INSERT INTO blocks (blocker_id,blocked_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [req.user.id, targetId]);
     if (onlineUsers[String(targetId)]) {
       io.to(onlineUsers[String(targetId)]).emit('you_are_blocked', { by_user_id: req.user.id });
@@ -429,9 +434,10 @@ app.post('/api/block', auth, rateLimit(20, 60000), async function(req, res) {
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.post('/api/unblock', auth, async function(req, res) {
+app.post('/api/unblock', auth, rateLimit(20, 60000), async function(req, res) {
   try {
     var targetId = parseInt(req.body.user_id);
+    if (isNaN(targetId) || !targetId) return res.status(400).json({ error: 'معرف غير صالح' });
     await db.query('DELETE FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.user.id, targetId]);
     if (onlineUsers[String(targetId)]) {
       io.to(onlineUsers[String(targetId)]).emit('you_are_unblocked', { by_user_id: req.user.id });
@@ -443,6 +449,7 @@ app.post('/api/unblock', auth, async function(req, res) {
 app.get('/api/block/status/:userId', auth, async function(req, res) {
   try {
     var targetId  = parseInt(req.params.userId);
+    if (isNaN(targetId)) return res.status(400).json({ error: 'معرف غير صالح' });
     var iBlocked  = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.user.id, targetId]);
     var theyBlocked = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [targetId, req.user.id]);
     res.json({ i_blocked: iBlocked.rows.length > 0, they_blocked: theyBlocked.rows.length > 0 });
@@ -524,9 +531,11 @@ app.get('/api/friends/requests', auth, async function(req, res) {
 
 app.get('/api/friends/status/:userId', auth, async function(req, res) {
   try {
+    var uid = parseInt(req.params.userId);
+    if (isNaN(uid)) return res.status(400).json({ error: 'معرف غير صالح' });
     var r = await db.query(
       'SELECT * FROM friendships WHERE (requester_id=$1 AND addressee_id=$2) OR (requester_id=$2 AND addressee_id=$1)',
-      [req.user.id, req.params.userId]
+      [req.user.id, uid]
     );
     if (!r.rows.length) return res.json({ status: 'none' });
     var f = r.rows[0];
@@ -574,7 +583,12 @@ app.delete('/api/chats/:chatId/delete', auth, async function(req, res) {
 
 app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [req.params.chatId]);
+    var chatId = s(req.params.chatId);
+    if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
+    // تحقق من أن المستخدم عضو في المحادثة
+    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [chatId]);
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -604,6 +618,8 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
       [chatId, req.user.id, 'text', text.trim(), reply_to ? JSON.stringify(reply_to) : null, forwarded, expires_at]
     );
     var msg = r.rows[0];
+    var sndr = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
+    msg.sender_name = sndr.rows.length ? sndr.rows[0].name : '';
 
     await updateChatMeta(chatId, req.user.id, text.trim());
     io.to(chatId).emit('new_message', msg);
@@ -611,16 +627,16 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.post('/api/chats/:chatId/messages/image', auth, upload.single('image'), async function(req, res) {
+app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload.single('image'), async function(req, res) {
   try {
-    var chatId = req.params.chatId;
+    var chatId = s(req.params.chatId);
+    if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
 
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-    if (chatRow.rows.length) {
-      var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
-      if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
-    }
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+    if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
 
     var b64 = req.file.buffer.toString('base64');
     var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
@@ -637,6 +653,8 @@ app.post('/api/chats/:chatId/messages/image', auth, upload.single('image'), asyn
       [chatId, req.user.id, 'image', up.secure_url, 'صورة', reply_to ? JSON.stringify(reply_to) : null]
     );
     var msg = r.rows[0];
+    var sndr2 = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
+    msg.sender_name = sndr2.rows.length ? sndr2.rows[0].name : '';
 
     await updateChatMeta(chatId, req.user.id, 'صورة 🖼️');
     io.to(chatId).emit('new_message', msg);
@@ -644,17 +662,17 @@ app.post('/api/chats/:chatId/messages/image', auth, upload.single('image'), asyn
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.post('/api/chats/:chatId/messages/audio', auth, upload.single('audio'), async function(req, res) {
+app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload.single('audio'), async function(req, res) {
   try {
-    var chatId   = req.params.chatId;
+    var chatId   = s(req.params.chatId);
+    if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
     var duration = parseInt(req.body.duration) || 0;
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
 
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-    if (chatRow.rows.length) {
-      var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
-      if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
-    }
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+    if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
 
     var b64 = req.file.buffer.toString('base64');
     var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
@@ -671,6 +689,8 @@ app.post('/api/chats/:chatId/messages/audio', auth, upload.single('audio'), asyn
       [chatId, req.user.id, 'voice', up.secure_url, duration, 'رسالة صوتية', reply_to ? JSON.stringify(reply_to) : null]
     );
     var msg = r.rows[0];
+    var sndr3 = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
+    msg.sender_name = sndr3.rows.length ? sndr3.rows[0].name : '';
 
     await updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية');
     io.to(chatId).emit('new_message', msg);
@@ -721,6 +741,8 @@ app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
     }
 
     await updateChatMeta(chatId, req.user.id, lastMsg);
+    var sndr4 = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
+    msg.sender_name = sndr4.rows.length ? sndr4.rows[0].name : '';
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -777,14 +799,18 @@ app.post('/api/messages/:id/react', auth, async function(req, res) {
 
 app.post('/api/chats/:chatId/read', auth, async function(req, res) {
   try {
-    await db.query('UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false', [req.params.chatId, req.user.id]);
-    var chatRow = await db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [req.params.chatId]);
+    var chatId = s(req.params.chatId);
+    if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
+    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    await db.query('UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false', [chatId, req.user.id]);
+    var chatRow = await db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [chatId]);
     if (chatRow.rows.length) {
       var uc = chatRow.rows[0].unread_count || {};
       uc[String(req.user.id)] = 0;
       var ra = chatRow.rows[0].read_at || {};
       ra[String(req.user.id)] = new Date().toISOString();
-      await db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3', [JSON.stringify(uc), JSON.stringify(ra), req.params.chatId]);
+      await db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3', [JSON.stringify(uc), JSON.stringify(ra), chatId]);
     }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
@@ -1122,7 +1148,8 @@ io.on('connection', function(socket) {
   });
 
   socket.on('join_chat', function(data) {
-    if (data && data.chat_id) socket.join(data.chat_id);
+    if (!socket.userId || !data || !data.chat_id) return;
+    socket.join(data.chat_id);
   });
 
   // ── يستمع لرسالة صوتية ──
@@ -1168,6 +1195,7 @@ io.on('connection', function(socket) {
   });
 
   socket.on('messages_seen', function(data) {
+    if (!socket.userId || !data || !data.chat_id) return;
     var now = new Date().toISOString();
     if (data.partner_id && onlineUsers[String(data.partner_id)]) {
       io.to(onlineUsers[String(data.partner_id)]).emit('messages_seen', {
@@ -1210,12 +1238,14 @@ io.on('connection', function(socket) {
   });
 
   socket.on('call_accept', function(d) {
+    if (!socket.userId || !d) return;
     if (d.to_socket_id) {
       io.to(d.to_socket_id).emit('call_accepted', { from_user: d.from_user, socket_id: socket.id });
     }
   });
 
   socket.on('call_reject', function(d) {
+    if (!socket.userId || !d) return;
     if (d.to_socket_id) {
       io.to(d.to_socket_id).emit('call_rejected', { reason: d.reason || 'rejected' });
     } else if (d.to_user_id && onlineUsers[String(d.to_user_id)]) {
@@ -1224,6 +1254,7 @@ io.on('connection', function(socket) {
   });
 
   socket.on('call_end', function(d) {
+    if (!socket.userId || !d) return;
     if (d.to_socket_id) {
       io.to(d.to_socket_id).emit('call_ended');
     } else if (d.to_user_id && onlineUsers[String(d.to_user_id)]) {
@@ -1231,9 +1262,9 @@ io.on('connection', function(socket) {
     }
   });
 
-  socket.on('webrtc_offer',  function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_offer',  { offer: d.offer, from_socket_id: socket.id }); });
-  socket.on('webrtc_answer', function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
-  socket.on('webrtc_ice',    function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
+  socket.on('webrtc_offer',  function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_offer',  { offer: d.offer, from_socket_id: socket.id }); });
+  socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
+  socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
   socket.on('disconnect', async function() {
     if (!socket.userId) return;
@@ -1279,4 +1310,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
