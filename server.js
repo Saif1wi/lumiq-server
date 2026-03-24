@@ -105,6 +105,30 @@ async function initDB() {
     PRIMARY KEY(user_id, notification_id)
   )`);
 
+  await db.query(`CREATE TABLE IF NOT EXISTS slides (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    image_url TEXT DEFAULT NULL,
+    grad TEXT NOT NULL DEFAULT 'sg1',
+    link TEXT DEFAULT NULL,
+    sort_order INT DEFAULT 0,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+
+  // إضافة سلايدات افتراضية إذا كان الجدول فارغاً
+  var slidesCount = await db.query('SELECT COUNT(*) FROM slides');
+  if (parseInt(slidesCount.rows[0].count) === 0) {
+    await db.query(`INSERT INTO slides (title, subtitle, grad, sort_order) VALUES
+      ('مرحباً في LUMIQ', 'تواصل بذكاء مع من تحب', 'sg1', 1),
+      ('رسائل صوتية', 'اضغط مطولاً للتسجيل', 'sg2', 2),
+      ('إرسال صور', 'اضغط أيقونة الصورة', 'sg3', 3),
+      ('دعم فني', 'الإعدادات ← واتساب', 'sg4', 4)
+    `);
+  }
+
+
   // Indexes
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id)').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)').catch(function(){});
@@ -834,6 +858,76 @@ app.post('/api/notifications/read', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+// ═══ SLIDES (public + admin) ═══
+app.get('/api/slides', async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM slides WHERE is_active=true ORDER BY sort_order ASC, id ASC');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.get('/api/admin/slides', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM slides ORDER BY sort_order ASC, id ASC');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/admin/slides', adminAuth, upload.single('image'), async function(req, res) {
+  try {
+    var title    = s(req.body.title    || '');
+    var subtitle = s(req.body.subtitle || '');
+    var grad     = s(req.body.grad     || 'sg1');
+    var link     = s(req.body.link     || '') || null;
+    var order    = parseInt(req.body.sort_order) || 0;
+    var image_url = null;
+    if (req.file) {
+      var b64 = req.file.buffer.toString('base64');
+      var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, { folder: 'lumiq/slides' });
+      image_url = up.secure_url;
+    }
+    var r = await db.query(
+      'INSERT INTO slides (title,subtitle,grad,link,image_url,sort_order) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [title, subtitle, grad, link, image_url, order]
+    );
+    res.json(r.rows[0]);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/admin/slides/:id', adminAuth, upload.single('image'), async function(req, res) {
+  try {
+    var id       = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'معرف غير صالح' });
+    var title    = s(req.body.title    || '');
+    var subtitle = s(req.body.subtitle || '');
+    var grad     = s(req.body.grad     || 'sg1');
+    var link     = s(req.body.link     || '') || null;
+    var order    = parseInt(req.body.sort_order) || 0;
+    var active   = req.body.is_active !== 'false' && req.body.is_active !== false;
+    var image_url = req.body.image_url || null;
+    if (req.file) {
+      var b64 = req.file.buffer.toString('base64');
+      var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, { folder: 'lumiq/slides' });
+      image_url = up.secure_url;
+    }
+    var r = await db.query(
+      'UPDATE slides SET title=$1,subtitle=$2,grad=$3,link=$4,image_url=$5,sort_order=$6,is_active=$7 WHERE id=$8 RETURNING *',
+      [title, subtitle, grad, link, image_url, order, active, id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    res.json(r.rows[0]);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/slides/:id', adminAuth, async function(req, res) {
+  try {
+    var id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'معرف غير صالح' });
+    await db.query('DELETE FROM slides WHERE id=$1', [id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══ ADMIN ═══
 app.get('/api/admin/stats', adminAuth, async function(req, res) {
   try {
@@ -1299,3 +1393,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
