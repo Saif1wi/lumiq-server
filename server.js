@@ -149,7 +149,8 @@ function rateLimit(max, windowMs) {
 setInterval(function() {
   var now = Date.now();
   Object.keys(rateLimitStore).forEach(function(ip) {
-    if (rateLimitStore[ip].every(function(t) { return now - t > 900000; })) delete rateLimitStore[ip];
+    rateLimitStore[ip] = rateLimitStore[ip].filter(function(t) { return now - t < 900000; });
+    if (!rateLimitStore[ip].length) delete rateLimitStore[ip];
   });
 }, 300000);
 
@@ -195,7 +196,7 @@ app.use(function(req, res, next) {
 
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
 app.options('*', cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 // ═══ STATIC ═══
 app.get('/api/ping', function(req, res) { res.json({ ok: true }); });
@@ -413,8 +414,11 @@ app.delete('/api/me', auth, async function(req, res) {
 });
 
 // ═══ BLOCK ═══
-app.post('/api/block', auth, async function(req, res) {
+app.post('/api/block', auth, rateLimit(20, 60000), async function(req, res) {
   try {
+    var targetId = parseInt(req.body.user_id);
+    if (isNaN(targetId)) return res.status(400).json({ error: 'معرف غير صالح' });
+    if (targetId === req.user.id) return res.status(400).json({ error: 'لا يمكنك حظر نفسك' });
     var targetId = parseInt(req.body.user_id);
     if (!targetId || targetId === req.user.id) return res.status(400).json({ error: 'غير صالح' });
     await db.query('INSERT INTO blocks (blocker_id,blocked_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [req.user.id, targetId]);
@@ -446,8 +450,9 @@ app.get('/api/block/status/:userId', auth, async function(req, res) {
 });
 
 // ═══ FRIENDS ═══
-app.post('/api/friends/request', auth, async function(req, res) {
+app.post('/api/friends/request', auth, rateLimit(20, 60000), async function(req, res) {
   try {
+    if (parseInt(req.body.user_id) === req.user.id) return res.status(400).json({ error: 'لا يمكنك إضافة نفسك' });
     var targetId = parseInt(req.body.user_id);
     if (!targetId || targetId === req.user.id) return res.status(400).json({ error: 'غير صالح' });
     if (await checkBlock(req.user.id, targetId)) return res.status(403).json({ error: 'لا يمكن إرسال طلب' });
@@ -574,10 +579,12 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.post('/api/chats/:chatId/messages', auth, async function(req, res) {
+app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async function(req, res) {
   try {
-    var chatId   = req.params.chatId;
-    var text     = req.body.text;
+    var chatId   = s(req.params.chatId);
+    if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
+    var text     = s(req.body.text);
+    if (text && text.length > 5000) return res.status(400).json({ error: 'الرسالة طويلة جداً' });
     var reply_to = req.body.reply_to;
     if (!text || !text.trim()) return res.status(400).json({ error: 'الرسالة فارغة' });
 
@@ -721,23 +728,28 @@ app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
 
 app.put('/api/messages/:id', auth, async function(req, res) {
   try {
-    var text  = req.body.text;
+    var text  = s(req.body.text);
     if (!text || !text.trim()) return res.status(400).json({ error: 'النص فارغ' });
-    var check = await db.query('SELECT sender_id, chat_id FROM messages WHERE id=$1', [req.params.id]);
+    if (text.length > 5000) return res.status(400).json({ error: 'النص طويل جداً' });
+    var msgId = parseInt(req.params.id);
+    if (isNaN(msgId)) return res.status(400).json({ error: 'معرف غير صالح' });
+    var check = await db.query('SELECT sender_id, chat_id FROM messages WHERE id=$1', [msgId]);
     if (!check.rows.length) return res.status(404).json({ error: 'غير موجود' });
     if (String(check.rows[0].sender_id) !== String(req.user.id)) return res.status(403).json({ error: 'غير مسموح' });
-    await db.query('UPDATE messages SET text=$1 WHERE id=$2', [text.trim(), req.params.id]);
-    io.to(check.rows[0].chat_id).emit('edit_message', { id: parseInt(req.params.id), text: text.trim() });
+    await db.query('UPDATE messages SET text=$1 WHERE id=$2', [text.trim(), msgId]);
+    io.to(check.rows[0].chat_id).emit('edit_message', { id: msgId, text: text.trim() });
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
 app.delete('/api/messages/:id', auth, async function(req, res) {
   try {
-    var check = await db.query('SELECT sender_id, chat_id FROM messages WHERE id=$1', [req.params.id]);
+    var msgId = parseInt(req.params.id);
+    if (isNaN(msgId)) return res.status(400).json({ error: 'معرف غير صالح' });
+    var check = await db.query('SELECT sender_id, chat_id FROM messages WHERE id=$1', [msgId]);
     if (!check.rows.length) return res.status(404).json({ error: 'غير موجود' });
     if (String(check.rows[0].sender_id) !== String(req.user.id)) return res.status(403).json({ error: 'غير مسموح' });
-    await db.query('DELETE FROM messages WHERE id=$1', [req.params.id]);
+    await db.query('DELETE FROM messages WHERE id=$1', [msgId]);
     // FIX: إرسال id بدلاً من msg_id ليتوافق مع الـ frontend
     io.to(check.rows[0].chat_id).emit('delete_message', { id: parseInt(req.params.id) });
     res.json({ ok: true });
@@ -750,11 +762,12 @@ app.post('/api/messages/:id/react', auth, async function(req, res) {
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     var reactions = r.rows[0].reactions || {};
     var chatId    = r.rows[0].chat_id;
-    // toggle
-    if (reactions[req.user.id] === req.body.emoji) {
+    var emoji     = s(req.body.emoji);
+    if (!emoji || emoji.length > 10) return res.status(400).json({ error: 'emoji غير صالح' });
+    if (reactions[req.user.id] === emoji) {
       delete reactions[req.user.id];
     } else {
-      reactions[req.user.id] = req.body.emoji;
+      reactions[req.user.id] = emoji;
     }
     await db.query('UPDATE messages SET reactions=$1 WHERE id=$2', [JSON.stringify(reactions), req.params.id]);
     io.to(chatId).emit('reaction', { msg_id: parseInt(req.params.id), reactions });
@@ -859,11 +872,13 @@ app.delete('/api/admin/users/:id', adminAuth, async function(req, res) {
 
 app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
   try {
+    var userId = parseInt(req.params.id);
+    if (isNaN(userId)) return res.status(400).json({ error: 'معرف غير صالح' });
     var banned = req.body.banned !== false;
-    var reason = req.body.reason || 'تم حظر حسابك من قِبَل الإدارة';
-    await db.query('UPDATE users SET is_banned=$1 WHERE id=$2', [banned, req.params.id]);
-    if (banned && onlineUsers[String(req.params.id)]) {
-      io.to(onlineUsers[String(req.params.id)]).emit('force_logout', { type: 'ban', reason });
+    var reason = s(req.body.reason) || 'تم حظر حسابك من قِبَل الإدارة';
+    await db.query('UPDATE users SET is_banned=$1 WHERE id=$2', [banned, userId]);
+    if (banned && onlineUsers[String(userId)]) {
+      io.to(onlineUsers[String(userId)]).emit('force_logout', { type: 'ban', reason });
     }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1075,6 +1090,7 @@ io.on('connection', function(socket) {
 
   socket.on('join', async function(data) {
     try {
+      if (!data || !data.token) return;
       var user = jwt.verify(data.token, JWT_SECRET);
       socket.userId = user.id;
       onlineUsers[String(user.id)] = socket.id;
@@ -1132,7 +1148,7 @@ io.on('connection', function(socket) {
   });
 
   socket.on('viewing_chat', function(data) {
-    if (!data || !data.chat_id) return;
+    if (!data || !data.chat_id || !socket.userId) return;
     socket.to(data.chat_id).emit('partner_viewing', {
       user_id:    socket.userId,
       chat_id:    data.chat_id,
@@ -1142,7 +1158,7 @@ io.on('connection', function(socket) {
   });
 
   socket.on('typing', function(data) {
-    if (data && data.chat_id) {
+    if (data && data.chat_id && socket.userId) {
       socket.to(data.chat_id).emit('typing', {
         chat_id:   data.chat_id,
         user_id:   data.user_id,
@@ -1220,13 +1236,14 @@ io.on('connection', function(socket) {
   socket.on('webrtc_ice',    function(d) { if (d.to_socket_id) io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
   socket.on('disconnect', async function() {
-    if (socket.userId) {
-      delete onlineUsers[String(socket.userId)];
-      try {
-        await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
-        io.emit('user_online', { user_id: socket.userId, is_online: false, last_seen: new Date() });
-      } catch(e) { console.error('disconnect error:', e.message); }
-    }
+    if (!socket.userId) return;
+    // تحقق أن هذا الـ socket هو الفعّال - منع race condition
+    if (onlineUsers[String(socket.userId)] !== socket.id) return;
+    delete onlineUsers[String(socket.userId)];
+    try {
+      await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
+      io.emit('user_online', { user_id: socket.userId, is_online: false, last_seen: new Date() });
+    } catch(e) { console.error('disconnect error:', e.message); }
   });
 });
 
