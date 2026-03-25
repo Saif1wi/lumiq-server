@@ -640,7 +640,7 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
     );
     var msg = r.rows[0];
 
-    await updateChatMeta(chatId, req.user.id, text.trim());
+    updateChatMeta(chatId, req.user.id, text.trim()).catch(function(e){console.error("meta err",e.message);});
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -673,7 +673,7 @@ app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload
     );
     var msg = r.rows[0];
 
-    await updateChatMeta(chatId, req.user.id, 'صورة 🖼️');
+    updateChatMeta(chatId, req.user.id, 'صورة 🖼️').catch(function(e){console.error('meta err',e.message);});
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -707,7 +707,7 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
     );
     var msg = r.rows[0];
 
-    await updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية');
+    updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية').catch(function(e){console.error('meta err',e.message);});
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -755,7 +755,7 @@ app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
       lastMsg = text.trim();
     }
 
-    await updateChatMeta(chatId, req.user.id, lastMsg);
+    updateChatMeta(chatId, req.user.id, lastMsg).catch(function(e){console.error("meta err",e.message);});
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -814,18 +814,27 @@ app.post('/api/chats/:chatId/read', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
-    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
-    if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-    await db.query('UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false', [chatId, req.user.id]);
-    var chatRow = await db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [chatId]);
-    if (chatRow.rows.length) {
-      var uc = chatRow.rows[0].unread_count || {};
-      uc[String(req.user.id)] = 0;
-      var ra = chatRow.rows[0].read_at || {};
-      ra[String(req.user.id)] = new Date().toISOString();
-      await db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3', [JSON.stringify(uc), JSON.stringify(ra), chatId]);
-    }
+    // ── رد فوري للـ client بدون انتظار DB ──
     res.json({ ok: true });
+    // ── تحديث DB بشكل غير متزامن (لا يُبطئ تجربة المستخدم) ──
+    db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)])
+      .then(function(access) {
+        if (!access.rows.length) return;
+        return db.query('UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false', [chatId, req.user.id])
+          .then(function() {
+            return db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [chatId]);
+          })
+          .then(function(chatRow) {
+            if (!chatRow.rows.length) return;
+            var uc = chatRow.rows[0].unread_count || {};
+            uc[String(req.user.id)] = 0;
+            var ra = chatRow.rows[0].read_at || {};
+            ra[String(req.user.id)] = new Date().toISOString();
+            return db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3',
+              [JSON.stringify(uc), JSON.stringify(ra), chatId]);
+          });
+      })
+      .catch(function(e) { console.error('markRead async error:', e.message); });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
