@@ -574,6 +574,15 @@ app.post('/api/chats', auth, async function(req, res) {
     if (ex.rows.length) return res.json(ex.rows[0]);
     var uc    = {}; uc[req.user.id] = 0; uc[other] = 0;
     var r     = await db.query('INSERT INTO chats (id,participants,unread_count) VALUES ($1,$2,$3) RETURNING *', [cid, ids, JSON.stringify(uc)]);
+    // أضف كلا المستخدمين للغرفة فوراً حتى تصل الرسائل بدون تأخير
+    if (onlineUsers[String(req.user.id)]) {
+      var senderSocket = io.sockets.sockets.get(onlineUsers[String(req.user.id)]);
+      if (senderSocket) senderSocket.join(cid);
+    }
+    if (onlineUsers[String(other)]) {
+      var otherSocket = io.sockets.sockets.get(onlineUsers[String(other)]);
+      if (otherSocket) otherSocket.join(cid);
+    }
     res.json(r.rows[0]);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -913,19 +922,11 @@ app.put('/api/admin/slides/:id', adminAuth, upload.single('image'), async functi
     var link     = s(req.body.link     || '') || null;
     var order    = parseInt(req.body.sort_order) || 0;
     var active   = req.body.is_active !== 'false' && req.body.is_active !== false;
-    // إذا رُفعت صورة جديدة → استخدمها، وإلا احتفظ بالحالية من DB
-    var image_url = null;
+    var image_url = req.body.image_url || null;
     if (req.file) {
       var b64 = req.file.buffer.toString('base64');
       var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, { folder: 'lumiq/slides' });
       image_url = up.secure_url;
-    } else if (req.body.image_url && req.body.image_url.trim() !== '') {
-      // الأدمن أرسل الصورة الحالية صراحةً → احتفظ بها
-      image_url = req.body.image_url.trim();
-    } else {
-      // لم يُرسل شيء → اقرأ الصورة الحالية من DB لا تمسحها
-      var existing = await db.query('SELECT image_url FROM slides WHERE id=$1', [id]);
-      image_url = (existing.rows[0] && existing.rows[0].image_url) || null;
     }
     var r = await db.query(
       'UPDATE slides SET title=$1,subtitle=$2,grad=$3,link=$4,image_url=$5,sort_order=$6,is_active=$7 WHERE id=$8 RETURNING *',
@@ -1013,9 +1014,15 @@ app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
 app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
   try {
     await db.query('UPDATE users SET is_verified=$1 WHERE id=$2', [req.body.verified, req.params.id]);
+    // أبلغ المستخدم نفسه
     if (onlineUsers[String(req.params.id)]) {
-      io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: req.body.verified });
+      io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: req.body.verified, user_id: parseInt(req.params.id) });
     }
+    // أبلغ جميع المستخدمين الآخرين في نفس المحادثات
+    var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(req.params.id)]);
+    chats.rows.forEach(function(c) {
+      io.to(c.id).emit('user_verified', { user_id: parseInt(req.params.id), is_verified: req.body.verified });
+    });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1071,8 +1078,14 @@ app.put('/api/admin/users/:id', adminAuth, async function(req, res) {
     if (b.ban_reason !== undefined) { updates.push('ban_reason=$' + i++); vals.push(b.ban_reason); }
     if (b.is_verified!== undefined) { updates.push('is_verified=$'+ i++); vals.push(b.is_verified);
       if (onlineUsers[String(req.params.id)]) {
-        io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: b.is_verified });
+        io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: b.is_verified, user_id: parseInt(req.params.id) });
       }
+      // أبلغ باقي المستخدمين في محادثاته
+      db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(req.params.id)]).then(function(chats) {
+        chats.rows.forEach(function(c) {
+          io.to(c.id).emit('user_verified', { user_id: parseInt(req.params.id), is_verified: b.is_verified });
+        });
+      }).catch(function(){});
     }
     if (!updates.length) return res.json({ ok: true });
     vals.push(req.params.id);
