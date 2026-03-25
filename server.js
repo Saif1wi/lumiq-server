@@ -913,11 +913,19 @@ app.put('/api/admin/slides/:id', adminAuth, upload.single('image'), async functi
     var link     = s(req.body.link     || '') || null;
     var order    = parseInt(req.body.sort_order) || 0;
     var active   = req.body.is_active !== 'false' && req.body.is_active !== false;
-    var image_url = req.body.image_url || null;
+    // إذا رُفعت صورة جديدة → استخدمها، وإلا احتفظ بالحالية من DB
+    var image_url = null;
     if (req.file) {
       var b64 = req.file.buffer.toString('base64');
       var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, { folder: 'lumiq/slides' });
       image_url = up.secure_url;
+    } else if (req.body.image_url && req.body.image_url.trim() !== '') {
+      // الأدمن أرسل الصورة الحالية صراحةً → احتفظ بها
+      image_url = req.body.image_url.trim();
+    } else {
+      // لم يُرسل شيء → اقرأ الصورة الحالية من DB لا تمسحها
+      var existing = await db.query('SELECT image_url FROM slides WHERE id=$1', [id]);
+      image_url = (existing.rows[0] && existing.rows[0].image_url) || null;
     }
     var r = await db.query(
       'UPDATE slides SET title=$1,subtitle=$2,grad=$3,link=$4,image_url=$5,sort_order=$6,is_active=$7 WHERE id=$8 RETURNING *',
