@@ -1212,30 +1212,39 @@ io.on('connection', function(socket) {
       var user = jwt.verify(data.token, JWT_SECRET);
       socket.userId = user.id;
       onlineUsers[String(user.id)] = socket.id;
-      await db.query('UPDATE users SET is_online=true, last_seen=NOW() WHERE id=$1', [user.id]);
-      io.emit('user_online', { user_id: user.id, is_online: true });
 
-      // انضمام لجميع غرف المحادثات
-      var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(user.id)]);
+      // ── أرسل user_online فقط لمن يهمه (أصحاب المحادثات) وليس للكل ──
+      // أولاً: انضم للغرف + حدّث DB بشكل متوازٍ
+      var [chats] = await Promise.all([
+        db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(user.id)]),
+        db.query('UPDATE users SET is_online=true, last_seen=NOW() WHERE id=$1', [user.id])
+      ]);
+
       chats.rows.forEach(function(c) { socket.join(c.id); });
 
-      // FIX: إرسال الإشعارات المعلقة كـ array مباشرة (يتوافق مع frontend)
-      var pending = await db.query(
-        'SELECT n.* FROM notifications n WHERE n.id NOT IN (SELECT notification_id FROM notification_reads WHERE user_id=$1) ORDER BY n.created_at ASC',
-        [user.id]
-      );
-      if (pending.rows.length > 0) {
-        socket.emit('pending_notifications', pending.rows);
+      // أرسل user_online فقط للمستخدمين في نفس الغرف (وليس broadcast للكل)
+      var roomIds = chats.rows.map(function(c) { return c.id; });
+      if (roomIds.length > 0) {
+        roomIds.forEach(function(rid) {
+          socket.to(rid).emit('user_online', { user_id: user.id, is_online: true });
+        });
       }
 
-      // FIX: إرسال طلبات الصداقة المعلقة كـ array مباشرة (يتوافق مع frontend)
-      var pendingFriends = await db.query(
-        'SELECT u.id,u.name,u.username,u.photo_url,u.is_verified FROM friendships f JOIN users u ON f.requester_id=u.id WHERE f.addressee_id=$1 AND f.status=$2',
-        [user.id, 'pending']
-      );
-      if (pendingFriends.rows.length > 0) {
-        socket.emit('pending_friend_requests', pendingFriends.rows);
-      }
+      // الإشعارات وطلبات الصداقة بشكل متوازٍ
+      var [pending, pendingFriends] = await Promise.all([
+        db.query(
+          'SELECT n.* FROM notifications n WHERE n.id NOT IN (SELECT notification_id FROM notification_reads WHERE user_id=$1) ORDER BY n.created_at ASC',
+          [user.id]
+        ),
+        db.query(
+          'SELECT u.id,u.name,u.username,u.photo_url,u.is_verified FROM friendships f JOIN users u ON f.requester_id=u.id WHERE f.addressee_id=$1 AND f.status=$2',
+          [user.id, 'pending']
+        )
+      ]);
+
+      if (pending.rows.length > 0) socket.emit('pending_notifications', pending.rows);
+      if (pendingFriends.rows.length > 0) socket.emit('pending_friend_requests', pendingFriends.rows);
+
     } catch(e) { console.error('join error:', e.message); }
   });
 
@@ -1360,12 +1369,16 @@ io.on('connection', function(socket) {
 
   socket.on('disconnect', async function() {
     if (!socket.userId) return;
-    // تحقق أن هذا الـ socket هو الفعّال - منع race condition
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
     delete onlineUsers[String(socket.userId)];
     try {
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
-      io.emit('user_online', { user_id: socket.userId, is_online: false, last_seen: new Date() });
+      // أرسل فقط للغرف المشتركة وليس broadcast للكل
+      var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)]);
+      var offline = { user_id: socket.userId, is_online: false, last_seen: new Date() };
+      chats.rows.forEach(function(c) {
+        socket.to(c.id).emit('user_online', offline);
+      });
     } catch(e) { console.error('disconnect error:', e.message); }
   });
 });
