@@ -129,6 +129,26 @@ async function initDB() {
   }
 
 
+  // ═══ جداول غرف الصوت ═══
+  await db.query(`CREATE TABLE IF NOT EXISTS voice_rooms (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    topic TEXT DEFAULT '',
+    created_by INT REFERENCES users(id) ON DELETE CASCADE,
+    is_active BOOLEAN DEFAULT true,
+    max_speakers INT DEFAULT 10,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`).catch(function(){});
+
+  await db.query(`CREATE TABLE IF NOT EXISTS voice_room_members (
+    room_id INT REFERENCES voice_rooms(id) ON DELETE CASCADE,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    is_speaker BOOLEAN DEFAULT false,
+    is_muted BOOLEAN DEFAULT false,
+    joined_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY(room_id, user_id)
+  )`).catch(function(){});
+
   // Indexes
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id)').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)').catch(function(){});
@@ -574,15 +594,6 @@ app.post('/api/chats', auth, async function(req, res) {
     if (ex.rows.length) return res.json(ex.rows[0]);
     var uc    = {}; uc[req.user.id] = 0; uc[other] = 0;
     var r     = await db.query('INSERT INTO chats (id,participants,unread_count) VALUES ($1,$2,$3) RETURNING *', [cid, ids, JSON.stringify(uc)]);
-    // أضف كلا المستخدمين للغرفة فوراً حتى تصل الرسائل بدون تأخير
-    if (onlineUsers[String(req.user.id)]) {
-      var senderSocket = io.sockets.sockets.get(onlineUsers[String(req.user.id)]);
-      if (senderSocket) senderSocket.join(cid);
-    }
-    if (onlineUsers[String(other)]) {
-      var otherSocket = io.sockets.sockets.get(onlineUsers[String(other)]);
-      if (otherSocket) otherSocket.join(cid);
-    }
     res.json(r.rows[0]);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -1014,15 +1025,9 @@ app.post('/api/admin/users/:id/ban', adminAuth, async function(req, res) {
 app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
   try {
     await db.query('UPDATE users SET is_verified=$1 WHERE id=$2', [req.body.verified, req.params.id]);
-    // أبلغ المستخدم نفسه
     if (onlineUsers[String(req.params.id)]) {
-      io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: req.body.verified, user_id: parseInt(req.params.id) });
+      io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: req.body.verified });
     }
-    // أبلغ جميع المستخدمين الآخرين في نفس المحادثات
-    var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(req.params.id)]);
-    chats.rows.forEach(function(c) {
-      io.to(c.id).emit('user_verified', { user_id: parseInt(req.params.id), is_verified: req.body.verified });
-    });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1078,14 +1083,8 @@ app.put('/api/admin/users/:id', adminAuth, async function(req, res) {
     if (b.ban_reason !== undefined) { updates.push('ban_reason=$' + i++); vals.push(b.ban_reason); }
     if (b.is_verified!== undefined) { updates.push('is_verified=$'+ i++); vals.push(b.is_verified);
       if (onlineUsers[String(req.params.id)]) {
-        io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: b.is_verified, user_id: parseInt(req.params.id) });
+        io.to(onlineUsers[String(req.params.id)]).emit('verified', { is_verified: b.is_verified });
       }
-      // أبلغ باقي المستخدمين في محادثاته
-      db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(req.params.id)]).then(function(chats) {
-        chats.rows.forEach(function(c) {
-          io.to(c.id).emit('user_verified', { user_id: parseInt(req.params.id), is_verified: b.is_verified });
-        });
-      }).catch(function(){});
     }
     if (!updates.length) return res.json({ ok: true });
     vals.push(req.params.id);
@@ -1220,6 +1219,46 @@ app.get('/api/admin/friends', adminAuth, async function(req, res) {
 
 app.get('/api/admin/online', adminAuth, function(req, res) {
   res.json({ count: Object.keys(onlineUsers).length, users: Object.keys(onlineUsers) });
+});
+
+// ═══ VOICE ROOMS API ═══
+app.get('/api/rooms', auth, async function(req, res) {
+  try {
+    var r = await db.query(`
+      SELECT vr.*, u.name as creator_name, u.photo_url as creator_photo,
+        (SELECT COUNT(*) FROM voice_room_members WHERE room_id=vr.id) as member_count,
+        (SELECT COUNT(*) FROM voice_room_members WHERE room_id=vr.id AND is_speaker=true) as speaker_count
+      FROM voice_rooms vr
+      JOIN users u ON vr.created_by=u.id
+      WHERE vr.is_active=true
+      ORDER BY vr.created_at DESC
+      LIMIT 50
+    `);
+    res.json(r.rows);
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.post('/api/rooms', auth, rateLimit(5, 60000), async function(req, res) {
+  try {
+    var name  = s(req.body.name);
+    var topic = s(req.body.topic) || '';
+    if (!name || name.length < 2) return res.status(400).json({ error: 'اسم الغرفة مطلوب' });
+    if (name.length > 50) return res.status(400).json({ error: 'الاسم طويل جداً' });
+    var r = await db.query(
+      'INSERT INTO voice_rooms (name,topic,created_by) VALUES ($1,$2,$3) RETURNING *',
+      [name, topic, req.user.id]
+    );
+    res.json(r.rows[0]);
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.delete('/api/rooms/:id', auth, async function(req, res) {
+  try {
+    var rid = parseInt(req.params.id);
+    await db.query('UPDATE voice_rooms SET is_active=false WHERE id=$1 AND created_by=$2', [rid, req.user.id]);
+    await db.query('DELETE FROM voice_room_members WHERE room_id=$1', [rid]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
 // ═══ SOCKET ═══
@@ -1388,6 +1427,65 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
+  // ═══ VOICE ROOMS SOCKET ═══
+  socket.on('room_join', async function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    try {
+      var rid = parseInt(data.room_id);
+      var room = await db.query('SELECT * FROM voice_rooms WHERE id=$1 AND is_active=true', [rid]);
+      if (!room.rows.length) { socket.emit('room_error', { msg: 'الغرفة غير موجودة' }); return; }
+      var isSpeaker = !!(data.as_speaker);
+      await db.query(
+        'INSERT INTO voice_room_members (room_id,user_id,is_speaker,is_muted) VALUES ($1,$2,$3,false) ON CONFLICT (room_id,user_id) DO UPDATE SET is_speaker=$3, joined_at=NOW()',
+        [rid, socket.userId, isSpeaker]
+      );
+      socket.join('vroom:' + rid);
+      // أرسل قائمة الأعضاء الحالية
+      var members = await db.query(
+        'SELECT u.id,u.name,u.username,u.photo_url,u.is_verified,vm.is_speaker,vm.is_muted FROM voice_room_members vm JOIN users u ON vm.user_id=u.id WHERE vm.room_id=$1',
+        [rid]
+      );
+      socket.emit('room_members', { room_id: rid, members: members.rows });
+      // أخبر الآخرين
+      var userRow = await db.query('SELECT id,name,username,photo_url,is_verified FROM users WHERE id=$1', [socket.userId]);
+      socket.to('vroom:' + rid).emit('room_user_joined', {
+        room_id: rid,
+        user: Object.assign({}, userRow.rows[0], { is_speaker: isSpeaker, is_muted: false }),
+        socket_id: socket.id
+      });
+    } catch(e) { console.error('room_join error:', e.message); }
+  });
+
+  socket.on('room_leave', async function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    var rid = parseInt(data.room_id);
+    try {
+      await db.query('DELETE FROM voice_room_members WHERE room_id=$1 AND user_id=$2', [rid, socket.userId]);
+      socket.leave('vroom:' + rid);
+      socket.to('vroom:' + rid).emit('room_user_left', { room_id: rid, user_id: socket.userId });
+    } catch(e) {}
+  });
+
+  socket.on('room_mute_toggle', async function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    var rid = parseInt(data.room_id);
+    var muted = !!data.muted;
+    try {
+      await db.query('UPDATE voice_room_members SET is_muted=$1 WHERE room_id=$2 AND user_id=$3', [muted, rid, socket.userId]);
+      io.to('vroom:' + rid).emit('room_mute_changed', { room_id: rid, user_id: socket.userId, muted: muted });
+    } catch(e) {}
+  });
+
+  socket.on('room_speaking', function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    socket.to('vroom:' + data.room_id).emit('room_speaking', { room_id: data.room_id, user_id: socket.userId, speaking: !!data.speaking });
+  });
+
+  // WebRTC للغرف الصوتية
+  socket.on('room_webrtc_offer',  function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('room_webrtc_offer',  { offer: d.offer, from_socket_id: socket.id, room_id: d.room_id }); });
+  socket.on('room_webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('room_webrtc_answer', { answer: d.answer, from_socket_id: socket.id, room_id: d.room_id }); });
+  socket.on('room_webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('room_webrtc_ice',    { candidate: d.candidate, from_socket_id: socket.id }); });
+
   socket.on('disconnect', async function() {
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
@@ -1400,6 +1498,13 @@ io.on('connection', function(socket) {
       chats.rows.forEach(function(c) {
         socket.to(c.id).emit('user_online', offline);
       });
+      // مغادرة غرف الصوت عند قطع الاتصال
+      var vrooms = await db.query('SELECT room_id FROM voice_room_members WHERE user_id=$1', [socket.userId]);
+      for (var i = 0; i < vrooms.rows.length; i++) {
+        var rid = vrooms.rows[i].room_id;
+        socket.to('vroom:' + rid).emit('room_user_left', { room_id: rid, user_id: socket.userId });
+      }
+      await db.query('DELETE FROM voice_room_members WHERE user_id=$1', [socket.userId]);
     } catch(e) { console.error('disconnect error:', e.message); }
   });
 });
