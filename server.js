@@ -155,20 +155,24 @@ async function initDB() {
 
 
   // ── غرف الدردشة الصوتية ──
-  await db.query(`CREATE TABLE IF NOT EXISTS voice_rooms (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    creator_id INT REFERENCES users(id) ON DELETE SET NULL,
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMP DEFAULT NOW()
-  )`).catch(function(){});
-
-  await db.query(`CREATE TABLE IF NOT EXISTS room_participants (
-    room_id INT REFERENCES voice_rooms(id) ON DELETE CASCADE,
-    user_id INT REFERENCES users(id) ON DELETE CASCADE,
-    joined_at TIMESTAMP DEFAULT NOW(),
-    PRIMARY KEY(room_id, user_id)
-  )`).catch(function(){});
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS voice_rooms (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      creator_id INT REFERENCES users(id) ON DELETE SET NULL,
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`);
+    await db.query(`CREATE TABLE IF NOT EXISTS room_participants (
+      room_id INT REFERENCES voice_rooms(id) ON DELETE CASCADE,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      joined_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY(room_id, user_id)
+    )`);
+    console.log('✅ voice_rooms tables ready');
+  } catch(e) {
+    console.error('❌ voice_rooms table error:', e.message);
+  }
 
   console.log('✅ DB ready');
 }
@@ -1507,4 +1511,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
