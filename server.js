@@ -1204,8 +1204,91 @@ app.get('/api/admin/online', adminAuth, function(req, res) {
 // ═══ SOCKET ═══
 var onlineUsers = {};
 
-// ═══ VOICE ROOMS (in-memory) ═══
-var voiceRooms = {}; // roomId → { id, name, desc, emoji, host_id, members[] }
+// ══ VOICE ROOMS DATA ══
+var voiceRooms = {};  // in-memory rooms
+
+// قائمة الهدايا المتاحة
+var vrGifts = {
+  '1':  { id:'1',  name:'قلب',      emoji:'❤️',  value:10  },
+  '2':  { id:'2',  name:'ورد',       emoji:'🌹',  value:20  },
+  '3':  { id:'3',  name:'كيك',      emoji:'🎂',  value:30  },
+  '4':  { id:'4',  name:'تاج',      emoji:'👑',  value:50  },
+  '5':  { id:'5',  name:'ألماسة',   emoji:'💎',  value:100 },
+  '6':  { id:'6',  name:'صاروخ',    emoji:'🚀',  value:200 },
+  '7':  { id:'7',  name:'يخت',      emoji:'🛥️',  value:500 },
+  '8':  { id:'8',  name:'قلعة',     emoji:'🏰',  value:999 }
+};
+
+// خلفيات الغرف
+var vrBgs = {
+  'g1': 'linear-gradient(160deg,#0A84FF,#5E5CE6)',
+  'g2': 'linear-gradient(160deg,#FF2D55,#FF6B00)',
+  'g3': 'linear-gradient(160deg,#34C759,#30D158)',
+  'g4': 'linear-gradient(160deg,#BF5AF2,#FF2D55)',
+  'g5': 'linear-gradient(160deg,#1C1C1E,#38383A)',
+  'g6': 'linear-gradient(160deg,#FF9500,#FF2D55)',
+  'g7': 'linear-gradient(160deg,#5AC8FA,#0A84FF)',
+  'g8': 'linear-gradient(160deg,#FFD60A,#FF9500)'
+};
+
+function getMembersArr(roomId) {
+  var room = voiceRooms[roomId];
+  if (!room) return [];
+  return Object.values(room.members).sort(function(a,b){ return a.mic_num - b.mic_num; });
+}
+
+function getPublicRooms() {
+  var result = {};
+  Object.keys(voiceRooms).forEach(function(rid) {
+    var r = voiceRooms[rid];
+    result[rid] = {
+      id: r.id,
+      name: r.name,
+      desc: r.desc,
+      photo: r.photo,
+      bg: r.bg,
+      owner_id: r.ownerId,
+      owner_name: r.ownerName,
+      seats: r.seats,
+      members: getMembersArr(rid),
+      member_count: Object.keys(r.members).length,
+      created_at: r.created_at
+    };
+  });
+  return result;
+}
+
+function vrLeaveRoom(socket, roomId, isDisconnect) {
+  var room = voiceRooms[roomId];
+  if (!room) return;
+  var wasOwner = String(room.ownerId) === String(socket.userId);
+  delete room.members[String(socket.userId)];
+  if (!isDisconnect) socket.leave('vr_' + roomId);
+  var remaining = Object.keys(room.members).length;
+  if (remaining === 0 || wasOwner) {
+    // أغلق الغرفة إذا انتهت أو غادر المالك
+    io.to('vr_' + roomId).emit('vr_room_closed', { room_id: roomId });
+    delete voiceRooms[roomId];
+    io.emit('vr_updated', { action: 'closed', room_id: roomId });
+  } else {
+    io.to('vr_' + roomId).emit('vr_member_left', {
+      room_id: roomId,
+      user_id: socket.userId,
+      members: getMembersArr(roomId)
+    });
+    io.emit('vr_updated', { action: 'left', room_id: roomId, count: remaining });
+  }
+}
+
+// API: قائمة الهدايا
+app.get('/api/vr/gifts', function(req, res) {
+  res.json(Object.values(vrGifts));
+});
+
+// API: قائمة الخلفيات
+app.get('/api/vr/bgs', function(req, res) {
+  res.json(vrBgs);
+});
 
 io.on('connection', function(socket) {
 
@@ -1214,8 +1297,6 @@ io.on('connection', function(socket) {
       if (!data || !data.token) return;
       var user = jwt.verify(data.token, JWT_SECRET);
       socket.userId = user.id;
-      socket._userName  = user.name  || 'مستخدم';
-      socket._userPhoto = user.photo_url || null;
       onlineUsers[String(user.id)] = socket.id;
 
       // ── أرسل user_online فقط لمن يهمه (أصحاب المحادثات) وليس للكل ──
@@ -1372,95 +1453,239 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
-  // ══ VOICE ROOMS ══
-  socket.on('vr_get_rooms', function() {
-    var rooms = Object.values(voiceRooms).filter(function(r) { return r.members.length > 0; });
-    socket.emit('vr_rooms_list', rooms);
+  // ═══════════════════════════════════════
+  // ══ VOICE ROOMS SYSTEM ══
+  // ═══════════════════════════════════════
+  // voiceRooms = { roomId: { id, name, desc, photo, bg, ownerId, ownerName, seats:8, members:{userId:{...}}, chat:[], gifts:[], created_at } }
+  // كل عضو: { id, name, username, photo_url, is_verified, mic_num, muted, hand, seat }
+
+  socket.on('vr_list', function() {
+    socket.emit('vr_rooms', { rooms: getPublicRooms() });
   });
 
-  socket.on('vr_create', function(data) {
-    if (!socket.userId || !data || !data.id || !data.name) return;
-    var room = {
-      id: data.id,
-      name: String(data.name).slice(0, 40),
-      desc: String(data.desc || '').slice(0, 60),
-      emoji: data.emoji || '🎙️',
-      host_id: socket.userId,
-      members: []
-    };
-    voiceRooms[room.id] = room;
-    io.emit('vr_room_created', room);
+  socket.on('vr_create', async function(data) {
+    if (!socket.userId || !data || !data.name) return;
+    try {
+      var user = await db.query('SELECT id,name,username,photo_url,is_verified FROM users WHERE id=$1', [socket.userId]);
+      if (!user.rows.length) return;
+      var u = user.rows[0];
+      // حد أقصى غرفة واحدة لكل مستخدم
+      var existing = Object.keys(voiceRooms).find(function(rid) {
+        return String(voiceRooms[rid].ownerId) === String(socket.userId);
+      });
+      if (existing) {
+        socket.emit('vr_error', { msg: 'لديك غرفة مفتوحة بالفعل' });
+        return;
+      }
+      var roomId = 'vr_' + Date.now() + '_' + socket.userId;
+      voiceRooms[roomId] = {
+        id: roomId,
+        name: String(data.name).trim().slice(0, 40),
+        desc: data.desc ? String(data.desc).trim().slice(0, 80) : '',
+        photo: data.photo || '',
+        bg: data.bg || 'g1',
+        ownerId: socket.userId,
+        ownerName: u.name,
+        seats: 8,
+        members: {},
+        chat: [],
+        gifts: [],
+        created_at: new Date()
+      };
+      socket.emit('vr_created', { room_id: roomId, name: voiceRooms[roomId].name });
+      io.emit('vr_updated', { action: 'created' });
+    } catch(e) { console.error('vr_create error:', e.message); }
   });
 
-  socket.on('vr_join', function(data) {
+  socket.on('vr_join', async function(data) {
     if (!socket.userId || !data || !data.room_id) return;
     var room = voiceRooms[data.room_id];
-    if (!room) return;
-    // أزل المستخدم من أي غرفة أخرى أولاً
-    Object.keys(voiceRooms).forEach(function(rid) {
-      if (rid === data.room_id) return;
-      var r = voiceRooms[rid];
-      r.members = r.members.filter(function(m) { return String(m.id) !== String(socket.userId); });
-      if (r.members.length === 0) delete voiceRooms[rid];
-    });
-    // أضف للغرفة الجديدة إن لم يكن موجوداً
-    var exists = room.members.find(function(m) { return String(m.id) === String(socket.userId); });
-    if (!exists) {
-      var userInfo = { id: socket.userId, name: socket._userName || 'مستخدم', photo_url: socket._userPhoto || null, muted: false };
-      room.members.push(userInfo);
+    if (!room) { socket.emit('vr_error', { msg: 'الغرفة غير موجودة' }); return; }
+    try {
+      var user = await db.query('SELECT id,name,username,photo_url,is_verified FROM users WHERE id=$1', [socket.userId]);
+      if (!user.rows.length) return;
+      var u = user.rows[0];
+      // أرقام المايكات المستخدمة
+      var usedMics = Object.values(room.members).map(function(m){ return m.mic_num; }).filter(Boolean);
+      var micNum = 1;
+      for (var i = 1; i <= room.seats; i++) {
+        if (usedMics.indexOf(i) === -1) { micNum = i; break; }
+      }
+      // مغادرة غرف أخرى إذا كان موجوداً
+      Object.keys(voiceRooms).forEach(function(rid) {
+        if (rid !== data.room_id && voiceRooms[rid].members[String(socket.userId)]) {
+          delete voiceRooms[rid].members[String(socket.userId)];
+          socket.leave('vr_' + rid);
+          io.to('vr_' + rid).emit('vr_member_left', {
+            room_id: rid, user_id: socket.userId,
+            members: getMembersArr(rid)
+          });
+        }
+      });
+      room.members[String(socket.userId)] = {
+        id: u.id, name: u.name, username: u.username,
+        photo_url: u.photo_url, is_verified: u.is_verified,
+        mic_num: micNum, muted: true, hand: false,
+        socket_id: socket.id, joined_at: new Date()
+      };
       socket.join('vr_' + data.room_id);
-      io.emit('vr_member_joined', { room_id: data.room_id, user: userInfo });
-    }
+      socket.emit('vr_joined', {
+        room_id: data.room_id,
+        name: room.name, desc: room.desc,
+        photo: room.photo, bg: room.bg,
+        owner_id: room.ownerId,
+        members: getMembersArr(data.room_id),
+        chat: room.chat.slice(-50),
+        gifts: room.gifts.slice(-20),
+        seats: room.seats
+      });
+      socket.to('vr_' + data.room_id).emit('vr_member_joined', {
+        room_id: data.room_id,
+        user: room.members[String(socket.userId)],
+        members: getMembersArr(data.room_id)
+      });
+      io.emit('vr_updated', { action: 'joined', room_id: data.room_id, count: Object.keys(room.members).length });
+    } catch(e) { console.error('vr_join error:', e.message); }
   });
 
   socket.on('vr_leave', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
-    var room = voiceRooms[data.room_id];
-    if (!room) return;
-    room.members = room.members.filter(function(m) { return String(m.id) !== String(socket.userId); });
-    socket.leave('vr_' + data.room_id);
-    io.emit('vr_member_left', { room_id: data.room_id, user_id: socket.userId });
-    if (room.members.length === 0) delete voiceRooms[data.room_id];
+    vrLeaveRoom(socket, data.room_id);
   });
 
-  socket.on('vr_mute', function(data) {
+  socket.on('vr_mic', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
     var room = voiceRooms[data.room_id];
-    if (!room) return;
-    var m = room.members.find(function(x) { return String(x.id) === String(socket.userId); });
-    if (m) m.muted = !!data.muted;
-    io.to('vr_' + data.room_id).emit('vr_mute_changed', {
-      room_id: data.room_id, user_id: socket.userId, muted: !!data.muted
+    if (!room || !room.members[String(socket.userId)]) return;
+    room.members[String(socket.userId)].muted = !!data.muted;
+    io.to('vr_' + data.room_id).emit('vr_mic_update', {
+      room_id: data.room_id,
+      user_id: socket.userId,
+      muted: !!data.muted,
+      mic_num: room.members[String(socket.userId)].mic_num
     });
   });
 
   socket.on('vr_speaking', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
     socket.to('vr_' + data.room_id).emit('vr_speaking', {
-      room_id: data.room_id, user_id: socket.userId, speaking: !!data.speaking
+      room_id: data.room_id,
+      user_id: socket.userId,
+      speaking: !!data.speaking
     });
   });
 
-  // WebRTC signaling داخل الغرف
-  socket.on('vr_offer', function(data) {
-    if (!socket.userId || !data || !data.to_user_id || !data.offer) return;
-    var toSocket = onlineUsers[String(data.to_user_id)];
-    if (toSocket) {
-      io.to(toSocket).emit('vr_offer', { from_user_id: socket.userId, offer: data.offer });
-    }
+  socket.on('vr_hand', function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    var room = voiceRooms[data.room_id];
+    if (!room || !room.members[String(socket.userId)]) return;
+    room.members[String(socket.userId)].hand = !!data.raised;
+    var m = room.members[String(socket.userId)];
+    io.to('vr_' + data.room_id).emit('vr_hand_raised', {
+      room_id: data.room_id,
+      user_id: socket.userId,
+      name: m.name,
+      raised: !!data.raised
+    });
   });
-  socket.on('vr_answer', function(data) {
-    if (!socket.userId || !data || !data.to_user_id || !data.answer) return;
-    var toSocket = onlineUsers[String(data.to_user_id)];
-    if (toSocket) {
-      io.to(toSocket).emit('vr_answer', { from_user_id: socket.userId, answer: data.answer });
-    }
+
+  socket.on('vr_msg', async function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.text) return;
+    var room = voiceRooms[data.room_id];
+    if (!room || !room.members[String(socket.userId)]) return;
+    var m = room.members[String(socket.userId)];
+    var msg = {
+      id: Date.now(),
+      room_id: data.room_id,
+      user_id: socket.userId,
+      name: m.name,
+      photo_url: m.photo_url,
+      is_verified: m.is_verified,
+      text: String(data.text).slice(0, 300),
+      ts: new Date().toISOString()
+    };
+    room.chat.push(msg);
+    if (room.chat.length > 200) room.chat = room.chat.slice(-200);
+    io.to('vr_' + data.room_id).emit('vr_msg', msg);
   });
-  socket.on('vr_ice', function(data) {
-    if (!socket.userId || !data || !data.to_user_id || !data.candidate) return;
-    var toSocket = onlineUsers[String(data.to_user_id)];
-    if (toSocket) {
-      io.to(toSocket).emit('vr_ice', { from_user_id: socket.userId, candidate: data.candidate });
+
+  // ── إرسال هدية ──
+  socket.on('vr_gift', async function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.gift_id || !data.to_user_id) return;
+    var room = voiceRooms[data.room_id];
+    if (!room || !room.members[String(socket.userId)]) return;
+    var sender = room.members[String(socket.userId)];
+    var receiver = room.members[String(data.to_user_id)];
+    if (!receiver) return;
+    var giftInfo = vrGifts[String(data.gift_id)] || vrGifts['1'];
+    var gift = {
+      id: Date.now(),
+      room_id: data.room_id,
+      from_id: socket.userId,
+      from_name: sender.name,
+      from_photo: sender.photo_url,
+      to_id: data.to_user_id,
+      to_name: receiver.name,
+      gift_id: data.gift_id,
+      gift_name: giftInfo.name,
+      gift_emoji: giftInfo.emoji,
+      gift_value: giftInfo.value,
+      ts: new Date().toISOString()
+    };
+    room.gifts.push(gift);
+    if (room.gifts.length > 100) room.gifts = room.gifts.slice(-100);
+    io.to('vr_' + data.room_id).emit('vr_gift', gift);
+  });
+
+  // ── تغيير صورة/خلفية الغرفة (المالك فقط) ──
+  socket.on('vr_update_room', function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    var room = voiceRooms[data.room_id];
+    if (!room || String(room.ownerId) !== String(socket.userId)) return;
+    if (data.photo !== undefined) room.photo = data.photo;
+    if (data.bg !== undefined) room.bg = data.bg;
+    if (data.name) room.name = String(data.name).trim().slice(0, 40);
+    if (data.desc !== undefined) room.desc = String(data.desc).trim().slice(0, 80);
+    io.to('vr_' + data.room_id).emit('vr_room_updated', {
+      room_id: data.room_id,
+      photo: room.photo, bg: room.bg,
+      name: room.name, desc: room.desc
+    });
+    io.emit('vr_updated', { action: 'updated', room_id: data.room_id });
+  });
+
+  // ── طرد عضو (المالك فقط) ──
+  socket.on('vr_kick', function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.user_id) return;
+    var room = voiceRooms[data.room_id];
+    if (!room || String(room.ownerId) !== String(socket.userId)) return;
+    var targetSocket = onlineUsers[String(data.user_id)];
+    if (targetSocket) {
+      io.to(targetSocket).emit('vr_kicked', { room_id: data.room_id });
+    }
+    delete room.members[String(data.user_id)];
+    io.to('vr_' + data.room_id).emit('vr_member_left', {
+      room_id: data.room_id,
+      user_id: data.user_id,
+      members: getMembersArr(data.room_id)
+    });
+    io.emit('vr_updated', { action: 'kicked', room_id: data.room_id });
+  });
+
+  // ── كتم عضو بواسطة المالك ──
+  socket.on('vr_mute_member', function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.user_id) return;
+    var room = voiceRooms[data.room_id];
+    if (!room || String(room.ownerId) !== String(socket.userId)) return;
+    if (room.members[String(data.user_id)]) {
+      room.members[String(data.user_id)].muted = true;
+      var targetSocket = onlineUsers[String(data.user_id)];
+      if (targetSocket) io.to(targetSocket).emit('vr_force_muted', { room_id: data.room_id });
+      io.to('vr_' + data.room_id).emit('vr_mic_update', {
+        room_id: data.room_id, user_id: data.user_id,
+        muted: true,
+        mic_num: room.members[String(data.user_id)].mic_num
+      });
     }
   });
 
@@ -1468,19 +1693,14 @@ io.on('connection', function(socket) {
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
     delete onlineUsers[String(socket.userId)];
-    // تنظيف الغرف الصوتية
+    // مغادرة أي غرفة صوتية
     Object.keys(voiceRooms).forEach(function(rid) {
-      var r = voiceRooms[rid];
-      var wasIn = r.members.find(function(m) { return String(m.id) === String(socket.userId); });
-      if (wasIn) {
-        r.members = r.members.filter(function(m) { return String(m.id) !== String(socket.userId); });
-        io.emit('vr_member_left', { room_id: rid, user_id: socket.userId });
-        if (r.members.length === 0) delete voiceRooms[rid];
+      if (voiceRooms[rid].members[String(socket.userId)]) {
+        vrLeaveRoom(socket, rid, true);
       }
     });
     try {
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
-      // أرسل فقط للغرف المشتركة وليس broadcast للكل
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)]);
       var offline = { user_id: socket.userId, is_online: false, last_seen: new Date() };
       chats.rows.forEach(function(c) {
