@@ -1424,7 +1424,7 @@ app.get('/api/rooms', auth, async function(req, res) {
       LIMIT 50
     `);
     res.json(rooms.rows);
-  } catch(e) { res.status(500).json({ error: 'خطأ في السيرفر' }); }
+  } catch(e) { console.error('GET /api/rooms error:', e.message); res.status(500).json({ error: e.message || 'خطأ في السيرفر' }); }
 });
 
 // إنشاء غرفة
@@ -1438,7 +1438,7 @@ app.post('/api/rooms', auth, async function(req, res) {
       [name, req.user.id]
     );
     res.json(result.rows[0]);
-  } catch(e) { res.status(500).json({ error: 'خطأ في السيرفر' }); }
+  } catch(e) { console.error('POST /api/rooms error:', e.message); res.status(500).json({ error: e.message || 'خطأ في السيرفر' }); }
 });
 
 // دخول غرفة
