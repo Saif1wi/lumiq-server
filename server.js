@@ -1227,7 +1227,7 @@ app.get('/api/admin/online', adminAuth, function(req, res) {
 app.get('/api/rooms', auth, async function(req, res) {
   try {
     var r = await db.query(
-      'SELECT ro.*, u.name as creator_name, u.username as creator_username, u.photo_url as creator_photo, (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id=ro.id) as member_count FROM rooms ro JOIN users u ON ro.creator_id=u.id WHERE ro.is_active=true ORDER BY ro.created_at DESC'
+      'SELECT ro.*, u.name as creator_name, u.username as creator_username, u.photo_url as creator_photo, (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id=ro.id) as member_count FROM rooms ro LEFT JOIN users u ON ro.creator_id=u.id WHERE ro.is_active=true ORDER BY ro.created_at DESC'
     );
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1244,14 +1244,14 @@ app.post('/api/rooms', auth, async function(req, res) {
     // إنشاء الغرفة
     var r = await db.query(
       'INSERT INTO rooms (name, description, creator_id) VALUES ($1,$2,$3) RETURNING *',
-      [name, desc, req.userId]
+      [name, desc, req.user.id]
     );
     var room = r.rows[0];
 
     // أضف المنشئ كعضو
     await db.query(
       'INSERT INTO room_members (room_id, user_id, role) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
-      [room.id, req.userId, 'admin']
+      [room.id, req.user.id, 'admin']
     );
 
     res.json(room);
