@@ -147,7 +147,10 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS battery_level INT DEFAULT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_battery BOOLEAN DEFAULT true",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
-    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'"
+    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INT DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily_login TIMESTAMP DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_streak INT DEFAULT 0"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
@@ -1708,5 +1711,47 @@ initDB().then(function() {
 }).catch(function(e) {
   console.error('❌ DB Error:', e);
   process.exit(1);
+});
+
+// ══ COINS ══
+// GET /coins — رصيد المستخدم
+app.get('/coins', auth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT coins, last_daily_login, daily_streak FROM users WHERE id=$1', [req.user.id]);
+    if (!r.rows.length) return res.json({coins:0, streak:0});
+    res.json({ coins: r.rows[0].coins||0, streak: r.rows[0].daily_streak||0 });
+  } catch(e) { res.json({coins:0,streak:0}); }
+});
+
+// POST /coins/daily — مكافأة يومية
+app.post('/coins/daily', auth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT coins, last_daily_login, daily_streak FROM users WHERE id=$1', [req.user.id]);
+    if (!r.rows.length) return res.status(404).json({error:'مستخدم غير موجود'});
+    var user = r.rows[0];
+    var today = new Date().toDateString();
+    var lastLogin = user.last_daily_login ? new Date(user.last_daily_login).toDateString() : '';
+    if (lastLogin === today) return res.json({already:true, coins:user.coins||0, streak:user.daily_streak||0});
+    var yesterday = new Date(Date.now()-86400000).toDateString();
+    var streak = (lastLogin===yesterday) ? (user.daily_streak||0)+1 : 1;
+    var bonus = Math.floor(streak/7)*25;
+    var amount = 50 + bonus + (streak-1)*5;
+    var newCoins = (user.coins||0)+amount;
+    await db.query('UPDATE users SET coins=$1, last_daily_login=NOW(), daily_streak=$2 WHERE id=$3',[newCoins,streak,req.user.id]);
+    res.json({claimed:true, amount:amount, coins:newCoins, streak:streak});
+  } catch(e) { console.error('daily coins:', e.message); res.status(500).json({error:'خطأ'}); }
+});
+
+// POST /coins/spend — صرف كوينز (للهدايا)
+app.post('/coins/spend', auth, async function(req, res) {
+  try {
+    var amount = parseInt(req.body.amount)||0;
+    if (amount<=0) return res.status(400).json({error:'مبلغ غير صالح'});
+    var r = await db.query('SELECT coins FROM users WHERE id=$1', [req.user.id]);
+    var coins = r.rows[0]&&r.rows[0].coins||0;
+    if (coins<amount) return res.status(400).json({error:'رصيد غير كافٍ', coins:coins});
+    await db.query('UPDATE users SET coins=coins-$1 WHERE id=$2',[amount,req.user.id]);
+    res.json({ok:true, coins:coins-amount});
+  } catch(e) { res.status(500).json({error:'خطأ'}); }
 });
 
