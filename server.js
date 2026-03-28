@@ -1340,9 +1340,19 @@ app.get('/api/rooms/search', auth, async function(req, res) {
   }
 });
 
-app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
+app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async function(req, res) {
   try {
-    var result = await db.query(`
+    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
+    var uploaded = await cloudinary.uploader.upload(req.file.path, {
+      folder: 'rooms', transformation: [{ width: 400, height: 400, crop: 'fill' }]
+    });
+    await db.query('ALTER TABLE rooms ADD COLUMN IF NOT EXISTS photo_url TEXT').catch(function(){});
+    await db.query('UPDATE rooms SET photo_url=$1 WHERE id=$2', [uploaded.secure_url, req.params.roomId]);
+    res.json({ photo_url: uploaded.secure_url });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+
       SELECT rm.*, u.name as sender_name, u.username as sender_username, u.photo_url as sender_photo
       FROM room_messages rm
       JOIN users u ON u.id = rm.sender_id
