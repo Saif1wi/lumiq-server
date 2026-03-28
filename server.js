@@ -1528,7 +1528,53 @@ io.on('connection', function(socket) {
     } catch(e) { console.error('room_message error:', e.message); }
   });
 
+  // ── MIC SLOTS ──
+  if (!global.roomMicSlots) global.roomMicSlots = {};
+
+  socket.on('room_mic_join', function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.slot || !data.user) return;
+    var key = 'room_' + data.room_id;
+    if (!global.roomMicSlots[key]) global.roomMicSlots[key] = {1:null,2:null,3:null,4:null,5:null};
+    // أزل المستخدم من أي مايك آخر في هذه الغرفة
+    for (var s = 1; s <= 5; s++) {
+      if (global.roomMicSlots[key][s] && global.roomMicSlots[key][s].id === socket.userId) {
+        global.roomMicSlots[key][s] = null;
+      }
+    }
+    global.roomMicSlots[key][data.slot] = { id: socket.userId, name: data.user.name, avatar: data.user.avatar || null };
+    io.to(key).emit('room_mic_join', { room_id: data.room_id, slot: data.slot, user: global.roomMicSlots[key][data.slot] });
+  });
+
+  socket.on('room_mic_leave', function(data) {
+    if (!data || !data.room_id || !data.slot) return;
+    var key = 'room_' + data.room_id;
+    if (global.roomMicSlots && global.roomMicSlots[key]) {
+      global.roomMicSlots[key][data.slot] = null;
+    }
+    io.to(key).emit('room_mic_leave', { room_id: data.room_id, slot: data.slot });
+  });
+
+  socket.on('room_mics_request', function(data) {
+    if (!data || !data.room_id) return;
+    var key = 'room_' + data.room_id;
+    var slots = (global.roomMicSlots && global.roomMicSlots[key]) || {1:null,2:null,3:null,4:null,5:null};
+    socket.emit('room_mics_state', { room_id: data.room_id, slots: slots });
+  });
+
   socket.on('disconnect', async function() {
+    // تنظيف المايكات عند انقطاع الاتصال
+    if (socket.userId && global.roomMicSlots) {
+      Object.keys(global.roomMicSlots).forEach(function(key) {
+        var slots = global.roomMicSlots[key];
+        for (var s = 1; s <= 5; s++) {
+          if (slots[s] && slots[s].id === socket.userId) {
+            slots[s] = null;
+            var roomId = key.replace('room_', '');
+            io.to(key).emit('room_mic_leave', { room_id: roomId, slot: s });
+          }
+        }
+      });
+    }
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
     delete onlineUsers[String(socket.userId)];
@@ -1575,4 +1621,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
