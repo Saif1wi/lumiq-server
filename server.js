@@ -1465,13 +1465,12 @@ io.on('connection', function(socket) {
     } catch(e) { console.error('room_message error:', e.message); }
   });
 
-
+  socket.on('disconnect', async function() {
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
     delete onlineUsers[String(socket.userId)];
     try {
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
-      // أرسل فقط للغرف المشتركة وليس broadcast للكل
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)]);
       var offline = { user_id: socket.userId, is_online: false, last_seen: new Date() };
       chats.rows.forEach(function(c) {
