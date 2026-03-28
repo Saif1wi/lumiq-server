@@ -1491,30 +1491,18 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
-  // ── WebRTC للمايكات الصوتية ──
-  socket.on('room_webrtc_offer',  function(d) {
-    if (!socket.userId || !d || !d.to) return;
-    io.to(d.to).emit('room_webrtc_offer',  { offer: d.offer,  from: socket.id, room_id: d.room_id });
-  });
-  socket.on('room_webrtc_answer', function(d) {
-    if (!socket.userId || !d || !d.to) return;
-    io.to(d.to).emit('room_webrtc_answer', { answer: d.answer, from: socket.id, room_id: d.room_id });
-  });
-  socket.on('room_webrtc_ice',    function(d) {
-    if (!socket.userId || !d || !d.to) return;
-    io.to(d.to).emit('room_webrtc_ice',    { candidate: d.candidate, from: socket.id, room_id: d.room_id });
-  });
+  // ── WebRTC للمايكات ──
+  socket.on('room_webrtc_offer',  function(d) { if (d && d.to) io.to(d.to).emit('room_webrtc_offer',  { offer:  d.offer,     from: socket.id, room_id: d.room_id }); });
+  socket.on('room_webrtc_answer', function(d) { if (d && d.to) io.to(d.to).emit('room_webrtc_answer', { answer: d.answer,    from: socket.id, room_id: d.room_id }); });
+  socket.on('room_webrtc_ice',    function(d) { if (d && d.to) io.to(d.to).emit('room_webrtc_ice',    { candidate: d.candidate, from: socket.id, room_id: d.room_id }); });
 
-  // ── قائمة socket IDs المتواجدين في الغرفة ──
+  // ── قائمة peers في الغرفة ──
   socket.on('room_peers_req', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
     var key = 'room_' + data.room_id;
-    var ids = [];
-    if (global.roomMicSockets && global.roomMicSockets[key]) {
-      Object.keys(global.roomMicSockets[key]).forEach(function(sid) {
-        if (sid !== socket.id) ids.push(sid);
-      });
-    }
+    var ids = global.roomMicSockets && global.roomMicSockets[key]
+      ? Object.keys(global.roomMicSockets[key]).filter(function(s) { return s !== socket.id; })
+      : [];
     socket.emit('room_peers_res', { room_id: data.room_id, socket_ids: ids });
   });
 
@@ -1557,30 +1545,20 @@ io.on('connection', function(socket) {
 
   // ── MIC SLOTS ──
   if (!global.roomMicSlots)   global.roomMicSlots   = {};
-  if (!global.roomMicSockets) global.roomMicSockets = {}; // key → { socketId: slot }
+  if (!global.roomMicSockets) global.roomMicSockets = {};
 
   socket.on('room_mic_join', function(data) {
     if (!socket.userId || !data || !data.room_id || !data.slot || !data.user) return;
     var key = 'room_' + data.room_id;
     if (!global.roomMicSlots[key])   global.roomMicSlots[key]   = {1:null,2:null,3:null,4:null,5:null};
     if (!global.roomMicSockets[key]) global.roomMicSockets[key] = {};
-    // أزل المستخدم من أي مايك آخر
     for (var s = 1; s <= 5; s++) {
       if (global.roomMicSlots[key][s] && global.roomMicSlots[key][s].id === socket.userId)
         global.roomMicSlots[key][s] = null;
     }
-    // أزل socket قديم لنفس المستخدم
-    Object.keys(global.roomMicSockets[key]).forEach(function(sid) {
-      if (global.roomMicSockets[key][sid] === socket.userId) delete global.roomMicSockets[key][sid];
-    });
     global.roomMicSlots[key][data.slot] = { id: socket.userId, name: data.user.name, avatar: data.user.avatar || null };
-    global.roomMicSockets[key][socket.id] = socket.userId;
-    io.to(key).emit('room_mic_join', {
-      room_id: data.room_id,
-      slot: data.slot,
-      user: global.roomMicSlots[key][data.slot],
-      socket_id: socket.id
-    });
+    global.roomMicSockets[key][socket.id] = true;
+    io.to(key).emit('room_mic_join', { room_id: data.room_id, slot: data.slot, user: global.roomMicSlots[key][data.slot], socket_id: socket.id });
   });
 
   socket.on('room_mic_leave', function(data) {
@@ -1599,22 +1577,18 @@ io.on('connection', function(socket) {
   });
 
   socket.on('disconnect', async function() {
-    // تنظيف المايكات عند انقطاع الاتصال
     if (socket.userId && global.roomMicSlots) {
       Object.keys(global.roomMicSlots).forEach(function(key) {
         var slots = global.roomMicSlots[key];
         for (var s = 1; s <= 5; s++) {
           if (slots[s] && slots[s].id === socket.userId) {
             slots[s] = null;
-            var roomId = key.replace('room_', '');
-            io.to(key).emit('room_mic_leave', { room_id: roomId, slot: s, socket_id: socket.id });
+            io.to(key).emit('room_mic_leave', { room_id: key.replace('room_',''), slot: s, socket_id: socket.id });
           }
         }
       });
       if (global.roomMicSockets) {
-        Object.keys(global.roomMicSockets).forEach(function(key) {
-          delete global.roomMicSockets[key][socket.id];
-        });
+        Object.keys(global.roomMicSockets).forEach(function(key) { delete global.roomMicSockets[key][socket.id]; });
       }
     }
     if (!socket.userId) return;
