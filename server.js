@@ -113,6 +113,13 @@ async function initDB() {
     creator_id INT REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT NOW()
   )`);
+  // إضافة عمود room_code إذا لم يكن موجوداً
+  await db.query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS room_code TEXT UNIQUE`).catch(function(){});
+  // توليد كود للغرف الموجودة التي لا تملك كوداً
+  await db.query(`
+    UPDATE rooms SET room_code = LPAD(FLOOR(RANDOM() * 900000 + 100000)::TEXT, 6, '0')
+    WHERE room_code IS NULL
+  `).catch(function(){});
 
   await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
     id SERIAL PRIMARY KEY,
@@ -1275,14 +1282,34 @@ app.get('/api/rooms', auth, async function(req, res) {
   }
 });
 
-app.post('/api/rooms', auth, async function(req, res) {
+app.get('/api/rooms/search', auth, async function(req, res) {
+  try {
+    var code = (req.query.code || '').trim();
+    if (!code) return res.status(400).json({ error: 'أدخل كود الغرفة' });
+    var result = await db.query(`
+      SELECT r.*, u.name as creator_name,
+        (SELECT COUNT(*) FROM room_messages WHERE room_id = r.id) as message_count
+      FROM rooms r
+      LEFT JOIN users u ON u.id = r.creator_id
+      WHERE r.room_code = $1
+    `, [code]);
+    if (!result.rows.length) return res.status(404).json({ error: 'لم يتم العثور على غرفة بهذا الكود' });
+    res.json(result.rows[0]);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
   try {
     var name = (req.body.name || '').trim();
     var description = (req.body.description || '').trim();
     if (!name) return res.status(400).json({ error: 'اسم الغرفة مطلوب' });
+    // توليد كود 6 أرقام فريد
+    var roomCode = String(Math.floor(100000 + Math.random() * 900000));
     var result = await db.query(
-      'INSERT INTO rooms (name, description, creator_id) VALUES ($1,$2,$3) RETURNING *',
-      [name, description, req.userId]
+      'INSERT INTO rooms (name, description, creator_id, room_code) VALUES ($1,$2,$3,$4) RETURNING *',
+      [name, description, req.userId, roomCode]
     );
     res.json(result.rows[0]);
   } catch(e) {
@@ -1292,6 +1319,7 @@ app.post('/api/rooms', auth, async function(req, res) {
       try {
         await db.query(`CREATE TABLE IF NOT EXISTS rooms (
           id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
+          room_code TEXT UNIQUE,
           creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
         )`);
         await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
@@ -1300,9 +1328,10 @@ app.post('/api/rooms', auth, async function(req, res) {
         )`);
         var name2 = (req.body.name || '').trim();
         var desc2 = (req.body.description || '').trim();
+        var code2 = String(Math.floor(100000 + Math.random() * 900000));
         var result2 = await db.query(
-          'INSERT INTO rooms (name, description, creator_id) VALUES ($1,$2,$3) RETURNING *',
-          [name2, desc2, req.userId]
+          'INSERT INTO rooms (name, description, creator_id, room_code) VALUES ($1,$2,$3,$4) RETURNING *',
+          [name2, desc2, req.userId, code2]
         );
         return res.json(result2.rows[0]);
       } catch(e2) { return res.status(500).json({ error: e2.message }); }
