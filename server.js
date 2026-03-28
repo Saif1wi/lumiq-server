@@ -1366,6 +1366,77 @@ app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ══════════════════════════════════════
+// خلفيات الغرف — Admin Routes
+// ══════════════════════════════════════
+
+// إنشاء جدول الخلفيات إذا ما موجود
+db.query(`
+  CREATE TABLE IF NOT EXISTS room_backgrounds (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    public_id TEXT,
+    used_count INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT NOW()
+  )
+`).catch(function(){});
+
+// GET — جلب كل الخلفيات
+app.get('/api/admin/backgrounds', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM room_backgrounds ORDER BY created_at DESC');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET — جلب الخلفيات للمستخدمين (بدون adminAuth)
+app.get('/api/backgrounds', auth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT id, name, url FROM room_backgrounds ORDER BY created_at DESC');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST — رفع خلفية جديدة
+app.post('/api/admin/backgrounds', adminAuth, upload.single('image'), async function(req, res) {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
+    var name = (req.body.name || '').trim() || 'خلفية';
+    var uploaded = await cloudinary.uploader.upload(req.file.path, {
+      folder: 'room_backgrounds',
+      transformation: [{ width: 1280, height: 720, crop: 'fill', quality: 85 }]
+    });
+    var r = await db.query(
+      'INSERT INTO room_backgrounds (name, url, public_id) VALUES ($1,$2,$3) RETURNING *',
+      [name, uploaded.secure_url, uploaded.public_id]
+    );
+    res.json(r.rows[0]);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE — حذف خلفية
+app.delete('/api/admin/backgrounds/:id', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT public_id FROM room_backgrounds WHERE id=$1', [req.params.id]);
+    if (r.rows.length && r.rows[0].public_id) {
+      await cloudinary.uploader.destroy(r.rows[0].public_id).catch(function(){});
+    }
+    await db.query('DELETE FROM room_backgrounds WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH — تحديث عداد الاستخدام عند اختيار المستخدم خلفية
+app.patch('/api/backgrounds/:id/use', auth, async function(req, res) {
+  try {
+    await db.query('UPDATE room_backgrounds SET used_count = used_count + 1 WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+
 // ═══ SOCKET ═══
 var onlineUsers = {};
 
