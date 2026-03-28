@@ -1491,19 +1491,18 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
-  // ── WebRTC للمايكات ──
-  socket.on('room_webrtc_offer',  function(d) { if (d && d.to) io.to(d.to).emit('room_webrtc_offer',  { offer:  d.offer,     from: socket.id, room_id: d.room_id }); });
-  socket.on('room_webrtc_answer', function(d) { if (d && d.to) io.to(d.to).emit('room_webrtc_answer', { answer: d.answer,    from: socket.id, room_id: d.room_id }); });
-  socket.on('room_webrtc_ice',    function(d) { if (d && d.to) io.to(d.to).emit('room_webrtc_ice',    { candidate: d.candidate, from: socket.id, room_id: d.room_id }); });
-
-  // ── قائمة peers في الغرفة ──
-  socket.on('room_peers_req', function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
+  // ══ نظام Audio Relay — بديل WebRTC ══
+  // استقبال chunk صوتي من مستخدم وبثه لكل من في نفس الغرفة
+  socket.on('room_audio_chunk', function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.chunk) return;
     var key = 'room_' + data.room_id;
-    var ids = global.roomMicSockets && global.roomMicSockets[key]
-      ? Object.keys(global.roomMicSockets[key]).filter(function(s) { return s !== socket.id; })
-      : [];
-    socket.emit('room_peers_res', { room_id: data.room_id, socket_ids: ids });
+    // أرسل للجميع في الغرفة ما عدا المرسل
+    socket.to(key).emit('room_audio_chunk', {
+      chunk:     data.chunk,
+      sender_id: socket.userId,
+      socket_id: socket.id,
+      room_id:   data.room_id
+    });
   });
 
   // ═══ ROOM SOCKET EVENTS ═══
