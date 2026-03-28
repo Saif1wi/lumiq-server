@@ -1232,7 +1232,23 @@ app.get('/api/rooms', auth, async function(req, res) {
       ORDER BY r.created_at DESC
     `);
     res.json(result.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    // إذا الجدول غير موجود أعد مصفوفة فارغة بعد إنشاء الجداول
+    if (e.message && e.message.includes('does not exist')) {
+      try {
+        await db.query(`CREATE TABLE IF NOT EXISTS rooms (
+          id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
+          creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
+        )`);
+        await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
+          id SERIAL PRIMARY KEY, room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
+          sender_id INT REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW()
+        )`);
+        return res.json([]);
+      } catch(e2) { return res.status(500).json({ error: e2.message }); }
+    }
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/rooms', auth, async function(req, res) {
@@ -1245,7 +1261,30 @@ app.post('/api/rooms', auth, async function(req, res) {
       [name, description, req.userId]
     );
     res.json(result.rows[0]);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error('POST /api/rooms error:', e.message);
+    // إذا الجدول غير موجود ننشئه ثم نعيد المحاولة
+    if (e.message && e.message.includes('relation') && e.message.includes('does not exist')) {
+      try {
+        await db.query(`CREATE TABLE IF NOT EXISTS rooms (
+          id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
+          creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
+        )`);
+        await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
+          id SERIAL PRIMARY KEY, room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
+          sender_id INT REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW()
+        )`);
+        var name2 = (req.body.name || '').trim();
+        var desc2 = (req.body.description || '').trim();
+        var result2 = await db.query(
+          'INSERT INTO rooms (name, description, creator_id) VALUES ($1,$2,$3) RETURNING *',
+          [name2, desc2, req.userId]
+        );
+        return res.json(result2.rows[0]);
+      } catch(e2) { return res.status(500).json({ error: e2.message }); }
+    }
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
@@ -1512,4 +1551,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
