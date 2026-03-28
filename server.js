@@ -1545,14 +1545,27 @@ io.on('connection', function(socket) {
   });
 
   // ═══ ROOM SOCKET EVENTS ═══
-  socket.on('join_room', function(data) {
+  socket.on('join_room', async function(data) {
     if (!socket.userId || !data || !data.room_id) return;
     var key = 'room_' + data.room_id;
     socket.join(key);
-    // أرسل عدد الأعضاء المحدّث لكل من في الغرفة
     var room = io.sockets.adapter.rooms.get(key);
     var count = room ? room.size : 1;
     io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
+    // رسالة ترحيب لباقي الأعضاء (مش للشخص نفسه)
+    try {
+      var uQ = await db.query('SELECT name, photo_url, is_verified FROM users WHERE id=$1', [socket.userId]);
+      if (uQ.rows.length) {
+        var u = uQ.rows[0];
+        socket.to(key).emit('room_user_join', {
+          room_id:    data.room_id,
+          user_id:    socket.userId,
+          name:       u.name,
+          photo_url:  u.photo_url || null,
+          is_verified: !!u.is_verified
+        });
+      }
+    } catch(e) {}
   });
 
   socket.on('leave_room', function(data) {
