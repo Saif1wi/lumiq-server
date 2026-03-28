@@ -1640,12 +1640,29 @@ io.on('connection', function(socket) {
     socket.emit('room_mics_state', { room_id: data.room_id, slots: slots });
   });
 
-  socket.on('room_members_request', function(data) {
+  socket.on('room_members_request', async function(data) {
     if (!data || !data.room_id) return;
     var key = 'room_' + data.room_id;
     var room = io.sockets.adapter.rooms.get(key);
     var count = room ? room.size : 1;
     io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
+    // إرسال قائمة الأعضاء مع بياناتهم
+    try {
+      if (room) {
+        var memberIds = [];
+        room.forEach(function(sid) {
+          var s = io.sockets.sockets.get(sid);
+          if (s && s.userId) memberIds.push(s.userId);
+        });
+        if (memberIds.length) {
+          var uQ = await db.query(
+            'SELECT id, name, username, photo_url, is_verified FROM users WHERE id = ANY($1)',
+            [memberIds]
+          );
+          socket.emit('room_members_list', { room_id: data.room_id, members: uQ.rows });
+        }
+      }
+    } catch(e) {}
   });
 
   socket.on('disconnect', async function() {
