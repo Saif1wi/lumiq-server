@@ -1491,14 +1491,13 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
-  // ══ نظام Audio Relay — بديل WebRTC (مُصلَح) ══
-  // chunk يصل كـ Base64 string ويُعاد إرساله كـ Base64 بدون تحويل
+  // ══ Audio Relay — بث الصوت للغرفة (Base64 فقط) ══
   socket.on('room_audio_chunk', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
-    if (!data.chunk || typeof data.chunk !== 'string') return; // Base64 فقط
+    if (!data.chunk || typeof data.chunk !== 'string') return;
     var key = 'room_' + data.room_id;
     socket.to(key).emit('room_audio_chunk', {
-      chunk:     data.chunk,    // Base64 string — بدون تعديل
+      chunk:     data.chunk,      // Base64 — بدون تعديل
       sender_id: socket.userId,
       room_id:   data.room_id
     });
