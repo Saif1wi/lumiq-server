@@ -1300,7 +1300,7 @@ app.get('/api/rooms/search', auth, async function(req, res) {
   }
 });
 
-
+app.post('/api/rooms', auth, async function(req, res) {
   try {
     var name = (req.body.name || '').trim();
     var description = (req.body.description || '').trim();
@@ -1352,7 +1352,9 @@ app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async functio
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-
+app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
+  try {
+    var result = await db.query(`
       SELECT rm.*, u.name as sender_name, u.username as sender_username, u.photo_url as sender_photo
       FROM room_messages rm
       JOIN users u ON u.id = rm.sender_id
