@@ -1491,14 +1491,16 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
-  // ══ Audio Relay — بث الصوت للغرفة (Base64 فقط) ══
+  // ══ نظام Audio Relay — بديل WebRTC ══
+  // استقبال chunk صوتي من مستخدم وبثه لكل من في نفس الغرفة
   socket.on('room_audio_chunk', function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    if (!data.chunk || typeof data.chunk !== 'string') return;
+    if (!socket.userId || !data || !data.room_id || !data.chunk) return;
     var key = 'room_' + data.room_id;
+    // أرسل للجميع في الغرفة ما عدا المرسل
     socket.to(key).emit('room_audio_chunk', {
-      chunk:     data.chunk,      // Base64 — بدون تعديل
+      chunk:     data.chunk,
       sender_id: socket.userId,
+      socket_id: socket.id,
       room_id:   data.room_id
     });
   });
@@ -1506,12 +1508,21 @@ io.on('connection', function(socket) {
   // ═══ ROOM SOCKET EVENTS ═══
   socket.on('join_room', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
-    socket.join('room_' + data.room_id);
+    var key = 'room_' + data.room_id;
+    socket.join(key);
+    // أرسل عدد الأعضاء المحدّث لكل من في الغرفة
+    var room = io.sockets.adapter.rooms.get(key);
+    var count = room ? room.size : 1;
+    io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
   });
 
   socket.on('leave_room', function(data) {
     if (!data || !data.room_id) return;
-    socket.leave('room_' + data.room_id);
+    var key = 'room_' + data.room_id;
+    socket.leave(key);
+    var room = io.sockets.adapter.rooms.get(key);
+    var count = room ? room.size : 0;
+    if (count > 0) io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
   });
 
   socket.on('room_message', async function(data) {
@@ -1571,6 +1582,14 @@ io.on('connection', function(socket) {
     var key = 'room_' + data.room_id;
     var slots = (global.roomMicSlots && global.roomMicSlots[key]) || {1:null,2:null,3:null,4:null,5:null};
     socket.emit('room_mics_state', { room_id: data.room_id, slots: slots });
+  });
+
+  socket.on('room_members_request', function(data) {
+    if (!data || !data.room_id) return;
+    var key = 'room_' + data.room_id;
+    var room = io.sockets.adapter.rooms.get(key);
+    var count = room ? room.size : 1;
+    io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
   });
 
   socket.on('disconnect', async function() {
