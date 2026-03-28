@@ -1491,6 +1491,57 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
+  // ── WebRTC Signaling للمايكات الصوتية ──
+  socket.on('room_webrtc_offer', function(d) {
+    if (!socket.userId || !d || !d.to_socket_id || !d.offer) return;
+    io.to(d.to_socket_id).emit('room_webrtc_offer', {
+      offer: d.offer,
+      from_socket_id: socket.id,
+      room_id: d.room_id
+    });
+  });
+
+  socket.on('room_webrtc_answer', function(d) {
+    if (!socket.userId || !d || !d.to_socket_id || !d.answer) return;
+    io.to(d.to_socket_id).emit('room_webrtc_answer', {
+      answer: d.answer,
+      from_socket_id: socket.id,
+      room_id: d.room_id
+    });
+  });
+
+  socket.on('room_webrtc_ice', function(d) {
+    if (!socket.userId || !d || !d.to_socket_id || !d.candidate) return;
+    io.to(d.to_socket_id).emit('room_webrtc_ice', {
+      candidate: d.candidate,
+      from_socket_id: socket.id,
+      room_id: d.room_id
+    });
+  });
+
+  // ── قائمة الـ peers في الغرفة ──
+  socket.on('room_voice_peers_request', function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    var key = 'room_' + data.room_id;
+    var slots = (global.roomMicSlots && global.roomMicSlots[key]) || {};
+    var socketIds = [];
+    var slotMap = {};
+    // أرجع الـ socket IDs للمتواجدين في المايكات (نتتبعهم في roomMicSockets)
+    if (!global.roomMicSockets) global.roomMicSockets = {};
+    if (!global.roomMicSockets[key]) global.roomMicSockets[key] = {};
+    Object.keys(global.roomMicSockets[key]).forEach(function(sid) {
+      if (sid !== socket.id) {
+        socketIds.push(sid);
+        slotMap[sid] = global.roomMicSockets[key][sid];
+      }
+    });
+    socket.emit('room_voice_peers', {
+      room_id: data.room_id,
+      socket_ids: socketIds,
+      slot_map: slotMap
+    });
+  });
+
   // ═══ ROOM SOCKET EVENTS ═══
   socket.on('join_room', function(data) {
     if (!socket.userId || !data || !data.room_id) return;
@@ -1530,19 +1581,31 @@ io.on('connection', function(socket) {
 
   // ── MIC SLOTS ──
   if (!global.roomMicSlots) global.roomMicSlots = {};
+  if (!global.roomMicSockets) global.roomMicSockets = {};
 
   socket.on('room_mic_join', function(data) {
     if (!socket.userId || !data || !data.room_id || !data.slot || !data.user) return;
     var key = 'room_' + data.room_id;
     if (!global.roomMicSlots[key]) global.roomMicSlots[key] = {1:null,2:null,3:null,4:null,5:null};
+    if (!global.roomMicSockets[key]) global.roomMicSockets[key] = {};
     // أزل المستخدم من أي مايك آخر في هذه الغرفة
     for (var s = 1; s <= 5; s++) {
       if (global.roomMicSlots[key][s] && global.roomMicSlots[key][s].id === socket.userId) {
         global.roomMicSlots[key][s] = null;
       }
     }
+    // أزل socket القديم للمستخدم
+    Object.keys(global.roomMicSockets[key]).forEach(function(sid) {
+      if (global.roomMicSockets[key][sid] === socket.userId) delete global.roomMicSockets[key][sid];
+    });
     global.roomMicSlots[key][data.slot] = { id: socket.userId, name: data.user.name, avatar: data.user.avatar || null };
-    io.to(key).emit('room_mic_join', { room_id: data.room_id, slot: data.slot, user: global.roomMicSlots[key][data.slot] });
+    global.roomMicSockets[key][socket.id] = data.slot; // تتبع socket_id → slot
+    io.to(key).emit('room_mic_join', {
+      room_id: data.room_id,
+      slot: data.slot,
+      user: global.roomMicSlots[key][data.slot],
+      socket_id: socket.id  // ← للـ WebRTC peer connection
+    });
   });
 
   socket.on('room_mic_leave', function(data) {
@@ -1551,7 +1614,10 @@ io.on('connection', function(socket) {
     if (global.roomMicSlots && global.roomMicSlots[key]) {
       global.roomMicSlots[key][data.slot] = null;
     }
-    io.to(key).emit('room_mic_leave', { room_id: data.room_id, slot: data.slot });
+    if (global.roomMicSockets && global.roomMicSockets[key]) {
+      delete global.roomMicSockets[key][socket.id];
+    }
+    io.to(key).emit('room_mic_leave', { room_id: data.room_id, slot: data.slot, socket_id: socket.id });
   });
 
   socket.on('room_mics_request', function(data) {
@@ -1570,10 +1636,16 @@ io.on('connection', function(socket) {
           if (slots[s] && slots[s].id === socket.userId) {
             slots[s] = null;
             var roomId = key.replace('room_', '');
-            io.to(key).emit('room_mic_leave', { room_id: roomId, slot: s });
+            io.to(key).emit('room_mic_leave', { room_id: roomId, slot: s, socket_id: socket.id });
           }
         }
       });
+      // تنظيف roomMicSockets
+      if (global.roomMicSockets) {
+        Object.keys(global.roomMicSockets).forEach(function(key) {
+          delete global.roomMicSockets[key][socket.id];
+        });
+      }
     }
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
@@ -1621,3 +1693,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
