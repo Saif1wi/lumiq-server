@@ -247,6 +247,22 @@ app.use(express.json({ limit: '10mb' }));
 // ═══ STATIC ═══
 app.get('/api/ping', function(req, res) { res.json({ ok: true }); });
 
+// endpoint مؤقت لإنشاء جداول الغرف يدوياً
+app.get('/api/setup-rooms', async function(req, res) {
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS rooms (
+      id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
+      creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
+    )`);
+    await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
+      id SERIAL PRIMARY KEY, room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
+      sender_id INT REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW()
+    )`);
+    await db.query('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room_id)').catch(function(){});
+    res.json({ ok: true, msg: 'Rooms tables created successfully' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/sw.js', function(req, res) {
   res.setHeader('Service-Worker-Allowed', '/');
   res.setHeader('Content-Type', 'application/javascript');
@@ -1551,3 +1567,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
