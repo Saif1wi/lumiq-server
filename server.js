@@ -1410,6 +1410,8 @@ io.on('connection', function(socket) {
       if (pending.rows.length > 0) socket.emit('pending_notifications', pending.rows);
       if (pendingFriends.rows.length > 0) socket.emit('pending_friend_requests', pendingFriends.rows);
 
+      socket.emit('join_ok');
+
     } catch(e) { console.error('join error:', e.message); }
   });
 
