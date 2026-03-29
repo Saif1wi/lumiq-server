@@ -1343,7 +1343,8 @@ app.post('/api/rooms', auth, async function(req, res) {
 app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async function(req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
-    var uploaded = await cloudinary.uploader.upload(req.file.path, {
+    var b64r = req.file.buffer.toString('base64');
+    var uploaded = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64r, {
       folder: 'rooms', transformation: [{ width: 400, height: 400, crop: 'fill' }]
     });
     await db.query('ALTER TABLE rooms ADD COLUMN IF NOT EXISTS photo_url TEXT').catch(function(){});
@@ -1428,9 +1429,11 @@ app.post('/api/admin/backgrounds', adminAuth, upload.single('image'), async func
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
     var name = (req.body.name || '').trim() || 'خلفية';
-    var uploaded = await cloudinary.uploader.upload(req.file.path, {
+    var b64 = req.file.buffer.toString('base64');
+    var dataUri = 'data:' + req.file.mimetype + ';base64,' + b64;
+    var uploaded = await cloudinary.uploader.upload(dataUri, {
       folder: 'room_backgrounds',
-      transformation: [{ width: 1280, height: 720, crop: 'fill', quality: 85 }]
+      transformation: [{ width: 1280, height: 720, crop: 'fill', quality: 'auto' }]
     });
     var r = await db.query(
       'INSERT INTO room_backgrounds (name, url, public_id) VALUES ($1,$2,$3) RETURNING *',
@@ -1821,3 +1824,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
