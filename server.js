@@ -1420,27 +1420,39 @@ app.get('/api/admin/backgrounds', adminAuth, async function(req, res) {
 app.get('/api/backgrounds', auth, async function(req, res) {
   try {
     var r = await db.query('SELECT id, name, url FROM room_backgrounds ORDER BY created_at DESC');
+    console.log('[BG-GET] rows:', r.rows.length);
     res.json(r.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error('[BG-GET] ERROR:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // POST — رفع خلفية جديدة
 app.post('/api/admin/backgrounds', adminAuth, upload.single('image'), async function(req, res) {
   try {
-    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
+    console.log('[BG-UPLOAD] body keys:', Object.keys(req.body));
+    console.log('[BG-UPLOAD] file:', req.file ? { fieldname: req.file.fieldname, mimetype: req.file.mimetype, size: req.file.size, hasBuffer: !!req.file.buffer } : 'NO FILE');
+    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة - req.file is null' });
+    if (!req.file.buffer) return res.status(400).json({ error: 'الملف موجود لكن buffer فارغ' });
     var name = (req.body.name || '').trim() || 'خلفية';
     var b64 = req.file.buffer.toString('base64');
     var dataUri = 'data:' + req.file.mimetype + ';base64,' + b64;
+    console.log('[BG-UPLOAD] uploading to cloudinary, dataUri length:', dataUri.length);
     var uploaded = await cloudinary.uploader.upload(dataUri, {
       folder: 'room_backgrounds',
       transformation: [{ width: 1280, height: 720, crop: 'fill', quality: 'auto' }]
     });
+    console.log('[BG-UPLOAD] cloudinary OK:', uploaded.secure_url);
     var r = await db.query(
       'INSERT INTO room_backgrounds (name, url, public_id) VALUES ($1,$2,$3) RETURNING *',
       [name, uploaded.secure_url, uploaded.public_id]
     );
     res.json(r.rows[0]);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error('[BG-UPLOAD] ERROR:', e.message, e.stack);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // DELETE — حذف خلفية
