@@ -247,7 +247,7 @@ app.use(function(req, res, next) {
   next();
 });
 
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
 app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 
@@ -1372,16 +1372,40 @@ app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
 // ══════════════════════════════════════
 
 // إنشاء جدول الخلفيات إذا ما موجود
-db.query(`
-  CREATE TABLE IF NOT EXISTS room_backgrounds (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    url TEXT NOT NULL,
-    public_id TEXT,
-    used_count INT DEFAULT 0,
-    created_at TIMESTAMP DEFAULT NOW()
-  )
-`).catch(function(){});
+(async function() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS room_backgrounds (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        public_id TEXT,
+        used_count INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('room_backgrounds table ready');
+  } catch(e) {
+    console.error('room_backgrounds table error:', e.message);
+  }
+})();
+
+// Route لإنشاء الجدول يدوياً من لوحة التحكم
+app.post('/api/admin/init-backgrounds', adminAuth, async function(req, res) {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS room_backgrounds (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        public_id TEXT,
+        used_count INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // GET — جلب كل الخلفيات
 app.get('/api/admin/backgrounds', adminAuth, async function(req, res) {
@@ -1797,4 +1821,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
