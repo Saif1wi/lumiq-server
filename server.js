@@ -1066,7 +1066,7 @@ app.get('/api/admin/users', adminAuth, async function(req, res) {
     var page   = parseInt(req.query.page) || 1;
     var search = req.query.search ? '%' + req.query.search + '%' : '%';
     var r      = await db.query(
-      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
+      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason,COALESCE(beans,0) as beans FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
       [search, (page-1)*50]
     );
     res.json(r.rows); // FIX: array مباشرة
@@ -1252,12 +1252,19 @@ app.post('/api/admin/users/:id/beans', adminAuth, async function(req, res) {
     await db.query('UPDATE users SET beans=$1 WHERE id=$2', [newBeans, uid]);
 
     // إرسال تحديث فوري للمستخدم عبر socket إن كان متصلاً
-    if (onlineUsers[String(uid)]) {
-      io.to(onlineUsers[String(uid)]).emit('beans_update', { beans: newBeans });
+    var socketId = onlineUsers[String(uid)];
+    if (socketId) {
+      io.to(socketId).emit('beans_update', { beans: newBeans });
+      console.log('✅ beans_update أُرسل للمستخدم', uid, '| socket:', socketId, '| الرصيد:', newBeans);
+    } else {
+      console.log('⚠️ المستخدم', uid, 'غير متصل — الرصيد محفوظ في DB');
     }
 
     res.json({ ok: true, beans: newBeans, name: userQ.rows[0].name, added: amount });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error('beans endpoint error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete('/api/admin/users/:id/photo', adminAuth, async function(req, res) {
