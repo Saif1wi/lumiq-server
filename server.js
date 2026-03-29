@@ -387,6 +387,7 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'No token' });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
+    req.userId = req.user.id; // FIX
     next();
   } catch(e) {
     res.status(401).json({ error: 'Invalid token' });
@@ -1251,18 +1252,13 @@ app.post('/api/admin/users/:id/beans', adminAuth, async function(req, res) {
 
     await db.query('UPDATE users SET beans=$1 WHERE id=$2', [newBeans, uid]);
 
-    // إرسال تحديث فوري للمستخدم عبر socket إن كان متصلاً
     var socketId = onlineUsers[String(uid)];
     if (socketId) {
       io.to(socketId).emit('beans_update', { beans: newBeans });
-      console.log('✅ beans_update أُرسل للمستخدم', uid, '| socket:', socketId, '| الرصيد:', newBeans);
-    } else {
-      console.log('⚠️ المستخدم', uid, 'غير متصل — الرصيد محفوظ في DB');
     }
 
     res.json({ ok: true, beans: newBeans, name: userQ.rows[0].name, added: amount });
   } catch(e) {
-    console.error('beans endpoint error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
