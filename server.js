@@ -1429,17 +1429,8 @@ app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async functio
 });
 
 app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
-  try {
-    var result = await db.query(`
-      SELECT rm.*, u.name as sender_name, u.username as sender_username, u.photo_url as sender_photo
-      FROM room_messages rm
-      JOIN users u ON u.id = rm.sender_id
-      WHERE rm.room_id = $1
-      ORDER BY rm.created_at ASC
-      LIMIT 100
-    `, [req.params.roomId]);
-    res.json(result.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  // رسائل الغرفة مؤقتة (مثل لودو) — لا يوجد سجل محفوظ
+  res.json([]);
 });
 
 
@@ -1870,23 +1861,20 @@ io.on('connection', function(socket) {
     try {
       var text = String(data.text).trim().slice(0, 2000);
       if (!text) return;
-      var result = await db.query(
-        'INSERT INTO room_messages (room_id, sender_id, text) VALUES ($1,$2,$3) RETURNING *',
-        [data.room_id, socket.userId, text]
-      );
-      var msg = result.rows[0];
-      var userQ = await db.query('SELECT name, username, photo_url FROM users WHERE id=$1', [socket.userId]);
+      // رسائل مؤقتة — بث فقط بدون حفظ في DB (مثل لودو)
+      var userQ = await db.query('SELECT name, username, photo_url, is_verified FROM users WHERE id=$1', [socket.userId]);
       if (!userQ.rows.length) return;
       var u = userQ.rows[0];
       io.to('room_' + data.room_id).emit('room_message', {
-        id: msg.id,
-        room_id: msg.room_id,
-        sender_id: socket.userId,
-        sender_name: u.name,
+        id:              Date.now(),
+        room_id:         data.room_id,
+        sender_id:       socket.userId,
+        sender_name:     u.name,
         sender_username: u.username,
-        sender_photo: u.photo_url,
-        text: msg.text,
-        created_at: msg.created_at
+        sender_photo:    u.photo_url,
+        is_verified:     !!u.is_verified,
+        text:            text,
+        created_at:      new Date()
       });
     } catch(e) { console.error('room_message error:', e.message); }
   });
