@@ -1380,43 +1380,47 @@ app.post('/api/rooms', auth, async function(req, res) {
     var name = (req.body.name || '').trim();
     var description = (req.body.description || '').trim();
     if (!name) return res.status(400).json({ error: 'اسم الغرفة مطلوب' });
-
-    // ✅ كل مستخدم غرفة واحدة فقط
-    var existingRoom = await db.query('SELECT id FROM rooms WHERE creator_id=$1', [req.userId]);
-    if (existingRoom.rows.length > 0) {
-      return res.status(400).json({ error: 'لديك غرفة بالفعل، لا يمكنك إنشاء أكثر من غرفة واحدة' });
-    }
-
-    // ✅ التحقق من الرصيد (5000 فاصوليا)
-    var ROOM_PRICE = 5000;
-    var userQ = await db.query('SELECT beans FROM users WHERE id=$1', [req.userId]);
-    var userBeans = userQ.rows[0] ? userQ.rows[0].beans : 0;
-    if (userBeans < ROOM_PRICE) {
-      return res.status(400).json({ error: 'تحتاج ' + ROOM_PRICE + ' فاصوليا لإنشاء غرفة، رصيدك: ' + userBeans });
-    }
-
-    // خصم الفاصولياء
-    await db.query('UPDATE users SET beans = beans - $1 WHERE id=$2', [ROOM_PRICE, req.userId]);
-
     // توليد كود 6 أرقام فريد
     var roomCode = String(Math.floor(100000 + Math.random() * 900000));
     var result = await db.query(
       'INSERT INTO rooms (name, description, creator_id, room_code) VALUES ($1,$2,$3,$4) RETURNING *',
       [name, description, req.userId, roomCode]
     );
-    res.json({ ...result.rows[0], beans: userBeans - ROOM_PRICE });
+    res.json(result.rows[0]);
   } catch(e) {
     console.error('POST /api/rooms error:', e.message);
+    // إذا الجدول غير موجود ننشئه ثم نعيد المحاولة
+    if (e.message && e.message.includes('relation') && e.message.includes('does not exist')) {
+      try {
+        await db.query(`CREATE TABLE IF NOT EXISTS rooms (
+          id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
+          room_code TEXT UNIQUE,
+          creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
+        )`);
+        await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
+          id SERIAL PRIMARY KEY, room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
+          sender_id INT REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW()
+        )`);
+        var name2 = (req.body.name || '').trim();
+        var desc2 = (req.body.description || '').trim();
+        var code2 = String(Math.floor(100000 + Math.random() * 900000));
+        var result2 = await db.query(
+          'INSERT INTO rooms (name, description, creator_id, room_code) VALUES ($1,$2,$3,$4) RETURNING *',
+          [name2, desc2, req.userId, code2]
+        );
+        return res.json(result2.rows[0]);
+      } catch(e2) { return res.status(500).json({ error: e2.message }); }
+    }
     res.status(500).json({ error: e.message });
   }
 });
 
-// ✅ حذف كل الغرف (للأدمن فقط)
-app.delete('/api/admin/rooms/all', adminAuth, async function(req, res) {
+// حذف كل الغرف — GET للسهولة (استخدمه مرة واحدة)
+app.get('/api/admin/rooms/clear', adminAuth, async function(req, res) {
   try {
     await db.query('DELETE FROM room_messages');
     await db.query('DELETE FROM rooms');
-    res.json({ ok: true, message: 'تم حذف جميع الغرف' });
+    res.json({ ok: true, message: 'تم حذف جميع الغرف ✅' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
