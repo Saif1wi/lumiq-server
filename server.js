@@ -174,11 +174,58 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS battery_level INT DEFAULT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_battery BOOLEAN DEFAULT true",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
-    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'"
+    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS beans INT DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily_beans TIMESTAMP DEFAULT NULL"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
   }
+
+  // جداول نظام الهدايا
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS gifts (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      image_url TEXT NOT NULL,
+      public_id TEXT,
+      price INT NOT NULL DEFAULT 10,
+      is_active BOOLEAN DEFAULT true,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(function(){});
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS gift_transactions (
+      id SERIAL PRIMARY KEY,
+      gift_id INT REFERENCES gifts(id) ON DELETE SET NULL,
+      sender_id INT REFERENCES users(id) ON DELETE CASCADE,
+      receiver_id INT REFERENCES users(id) ON DELETE CASCADE,
+      room_id INT REFERENCES rooms(id) ON DELETE SET NULL,
+      total_beans INT NOT NULL,
+      receiver_cut INT NOT NULL,
+      room_cut INT NOT NULL,
+      app_cut INT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(function(){});
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS gift_settings (
+      id INT PRIMARY KEY DEFAULT 1,
+      receiver_pct INT DEFAULT 50,
+      room_pct INT DEFAULT 30,
+      app_pct INT DEFAULT 20,
+      daily_beans INT DEFAULT 50
+    )
+  `).catch(function(){});
+
+  // إدخال إعدادات افتراضية إذا ما موجودة
+  await db.query(`
+    INSERT INTO gift_settings (id, receiver_pct, room_pct, app_pct, daily_beans)
+    VALUES (1, 50, 30, 20, 50)
+    ON CONFLICT (id) DO NOTHING
+  `).catch(function(){});
 
   console.log('✅ DB ready');
 }
@@ -1368,124 +1415,200 @@ app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
 });
 
 
+
+
 // ══════════════════════════════════════
-// خلفيات الغرف — Admin Routes
+// نظام الهدايا والفاصولياء
 // ══════════════════════════════════════
 
-// إنشاء جدول الخلفيات إذا ما موجود
-(async function() {
+// GET — رصيد المستخدم
+app.get('/api/me/beans', auth, async function(req, res) {
   try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS room_backgrounds (
-        id SERIAL PRIMARY KEY,
-        name TEXT DEFAULT 'خلفية',
-        url TEXT DEFAULT '',
-        public_id TEXT,
-        used_count INT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    // إضافة الأعمدة الناقصة إذا الجدول كان موجوداً بهيكل قديم
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS url TEXT DEFAULT ''`).catch(function(){});
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS name TEXT DEFAULT 'خلفية'`).catch(function(){});
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS public_id TEXT`).catch(function(){});
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS used_count INT DEFAULT 0`).catch(function(){});
-    console.log('room_backgrounds table ready');
-  } catch(e) {
-    console.error('room_backgrounds table error:', e.message);
-  }
-})();
-
-// Route لإنشاء/إصلاح الجدول من لوحة التحكم
-app.post('/api/admin/init-backgrounds', adminAuth, async function(req, res) {
-  try {
-    // إضافة الأعمدة الناقصة إذا كان الجدول موجود بهيكل قديم
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS room_backgrounds (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL DEFAULT 'خلفية',
-        url TEXT NOT NULL DEFAULT '',
-        public_id TEXT,
-        used_count INT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    // إضافة الأعمدة الناقصة إذا ما موجودة
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS url TEXT NOT NULL DEFAULT ''`).catch(function(){});
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'خلفية'`).catch(function(){});
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS public_id TEXT`).catch(function(){});
-    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS used_count INT DEFAULT 0`).catch(function(){});
-    res.json({ ok: true, message: 'الجدول جاهز' });
+    var r = await db.query('SELECT beans FROM users WHERE id=$1', [req.userId]);
+    res.json({ beans: r.rows[0] ? r.rows[0].beans : 0 });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET — جلب كل الخلفيات
-app.get('/api/admin/backgrounds', adminAuth, async function(req, res) {
+// POST — جمع الفاصولياء اليومية
+app.post('/api/me/daily-beans', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT * FROM room_backgrounds ORDER BY created_at DESC');
+    var settings = await db.query('SELECT daily_beans FROM gift_settings WHERE id=1');
+    var daily = settings.rows[0] ? settings.rows[0].daily_beans : 50;
+    var user = await db.query('SELECT beans, last_daily_beans FROM users WHERE id=$1', [req.userId]);
+    if (!user.rows.length) return res.status(404).json({ error: 'مستخدم غير موجود' });
+    var lastClaim = user.rows[0].last_daily_beans;
+    var now = new Date();
+    if (lastClaim) {
+      var last = new Date(lastClaim);
+      var diffHours = (now - last) / (1000 * 60 * 60);
+      if (diffHours < 24) {
+        var nextIn = Math.ceil(24 - diffHours);
+        return res.status(400).json({ error: 'جمعت فاصولياءك اليوم', next_in_hours: nextIn });
+      }
+    }
+    var updated = await db.query(
+      'UPDATE users SET beans = beans + $1, last_daily_beans = NOW() WHERE id=$2 RETURNING beans',
+      [daily, req.userId]
+    );
+    res.json({ beans: updated.rows[0].beans, earned: daily });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET — قائمة الهدايا المتاحة
+app.get('/api/gifts', auth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM gifts WHERE is_active=true ORDER BY price ASC');
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET — جلب الخلفيات للمستخدمين (بدون adminAuth)
-app.get('/api/backgrounds', auth, async function(req, res) {
+// POST — إرسال هدية
+app.post('/api/gifts/send', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id, name, url FROM room_backgrounds ORDER BY created_at DESC');
-    console.log('[BG-GET] rows:', r.rows.length);
-    res.json(r.rows);
-  } catch(e) {
-    console.error('[BG-GET] ERROR:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
+    var gift_id   = parseInt(req.body.gift_id);
+    var receiver_id = parseInt(req.body.receiver_id);
+    var room_id   = req.body.room_id ? parseInt(req.body.room_id) : null;
 
-// POST — رفع خلفية جديدة
-app.post('/api/admin/backgrounds', adminAuth, upload.single('image'), async function(req, res) {
-  try {
-    console.log('[BG-UPLOAD] body keys:', Object.keys(req.body));
-    console.log('[BG-UPLOAD] file:', req.file ? { fieldname: req.file.fieldname, mimetype: req.file.mimetype, size: req.file.size, hasBuffer: !!req.file.buffer } : 'NO FILE');
-    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة - req.file is null' });
-    if (!req.file.buffer) return res.status(400).json({ error: 'الملف موجود لكن buffer فارغ' });
-    var name = (req.body.name || '').trim() || 'خلفية';
-    var b64 = req.file.buffer.toString('base64');
-    var dataUri = 'data:' + req.file.mimetype + ';base64,' + b64;
-    console.log('[BG-UPLOAD] uploading to cloudinary, dataUri length:', dataUri.length);
-    var uploaded = await cloudinary.uploader.upload(dataUri, {
-      folder: 'room_backgrounds',
-      transformation: [{ width: 1280, height: 720, crop: 'fill', quality: 'auto' }]
+    if (!gift_id || !receiver_id) return res.status(400).json({ error: 'بيانات ناقصة' });
+    if (receiver_id === req.userId) return res.status(400).json({ error: 'لا تستطيع إرسال هدية لنفسك' });
+
+    // جلب الهدية والإعدادات والمستخدم
+    var [giftQ, settingsQ, senderQ] = await Promise.all([
+      db.query('SELECT * FROM gifts WHERE id=$1 AND is_active=true', [gift_id]),
+      db.query('SELECT * FROM gift_settings WHERE id=1'),
+      db.query('SELECT beans FROM users WHERE id=$1', [req.userId])
+    ]);
+
+    if (!giftQ.rows.length) return res.status(404).json({ error: 'الهدية غير موجودة' });
+    var gift = giftQ.rows[0];
+    var settings = settingsQ.rows[0] || { receiver_pct: 50, room_pct: 30, app_pct: 20 };
+    var sender = senderQ.rows[0];
+
+    if (!sender || sender.beans < gift.price) {
+      return res.status(400).json({ error: 'رصيدك غير كافٍ', beans: sender ? sender.beans : 0 });
+    }
+
+    // حساب التوزيع
+    var total = gift.price;
+    var receiver_cut = Math.floor(total * settings.receiver_pct / 100);
+    var room_cut     = Math.floor(total * settings.room_pct / 100);
+    var app_cut      = total - receiver_cut - room_cut;
+
+    // خصم من المرسل + إضافة للمتلقي
+    await db.query('UPDATE users SET beans = beans - $1 WHERE id=$2', [total, req.userId]);
+    await db.query('UPDATE users SET beans = beans + $1 WHERE id=$2', [receiver_cut, receiver_id]);
+
+    // إضافة لصاحب الغرفة إذا موجود
+    if (room_id) {
+      var roomQ = await db.query('SELECT creator_id FROM rooms WHERE id=$1', [room_id]);
+      if (roomQ.rows.length && roomQ.rows[0].creator_id && roomQ.rows[0].creator_id !== receiver_id) {
+        await db.query('UPDATE users SET beans = beans + $1 WHERE id=$2', [room_cut, roomQ.rows[0].creator_id]);
+      }
+    }
+
+    // تسجيل المعاملة
+    await db.query(
+      'INSERT INTO gift_transactions (gift_id,sender_id,receiver_id,room_id,total_beans,receiver_cut,room_cut,app_cut) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [gift_id, req.userId, receiver_id, room_id, total, receiver_cut, room_cut, app_cut]
+    );
+
+    // جلب بيانات المرسل للإشعار
+    var senderInfo = await db.query('SELECT name, username, photo_url FROM users WHERE id=$1', [req.userId]);
+    var senderData = senderInfo.rows[0] || {};
+
+    // رصيد المرسل الجديد
+    var newBalance = await db.query('SELECT beans FROM users WHERE id=$1', [req.userId]);
+
+    res.json({
+      ok: true,
+      beans: newBalance.rows[0].beans,
+      gift: gift,
+      receiver_cut: receiver_cut,
+      room_cut: room_cut,
+      app_cut: app_cut,
+      sender: senderData
     });
-    console.log('[BG-UPLOAD] cloudinary OK:', uploaded.secure_url);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Admin: إعدادات النسب ──
+app.get('/api/admin/gift-settings', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM gift_settings WHERE id=1');
+    res.json(r.rows[0] || { receiver_pct:50, room_pct:30, app_pct:20, daily_beans:50 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/admin/gift-settings', adminAuth, async function(req, res) {
+  try {
+    var { receiver_pct, room_pct, app_pct, daily_beans } = req.body;
+    var total = (receiver_pct||0) + (room_pct||0) + (app_pct||0);
+    if (total !== 100) return res.status(400).json({ error: 'مجموع النسب يجب أن يساوي 100' });
+    await db.query(
+      'UPDATE gift_settings SET receiver_pct=$1, room_pct=$2, app_pct=$3, daily_beans=$4 WHERE id=1',
+      [receiver_pct, room_pct, app_pct, daily_beans]
+    );
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Admin: إدارة الهدايا ──
+app.get('/api/admin/gifts', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query('SELECT * FROM gifts ORDER BY created_at DESC');
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/gifts', adminAuth, upload.single('image'), async function(req, res) {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
+    var name  = (req.body.name || '').trim();
+    var price = parseInt(req.body.price) || 10;
+    if (!name) return res.status(400).json({ error: 'اسم الهدية مطلوب' });
+    var b64 = req.file.buffer.toString('base64');
+    var uploaded = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
+      folder: 'gifts'
+    });
     var r = await db.query(
-      'INSERT INTO room_backgrounds (name, url, public_id) VALUES ($1,$2,$3) RETURNING *',
-      [name, uploaded.secure_url, uploaded.public_id]
+      'INSERT INTO gifts (name, image_url, public_id, price) VALUES ($1,$2,$3,$4) RETURNING *',
+      [name, uploaded.secure_url, uploaded.public_id, price]
     );
     res.json(r.rows[0]);
-  } catch(e) {
-    console.error('[BG-UPLOAD] ERROR:', e.message, e.stack);
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE — حذف خلفية
-app.delete('/api/admin/backgrounds/:id', adminAuth, async function(req, res) {
+app.delete('/api/admin/gifts/:id', adminAuth, async function(req, res) {
   try {
-    var r = await db.query('SELECT public_id FROM room_backgrounds WHERE id=$1', [req.params.id]);
-    if (r.rows.length && r.rows[0].public_id) {
-      await cloudinary.uploader.destroy(r.rows[0].public_id).catch(function(){});
+    var g = await db.query('SELECT public_id FROM gifts WHERE id=$1', [req.params.id]);
+    if (g.rows.length && g.rows[0].public_id) {
+      await cloudinary.uploader.destroy(g.rows[0].public_id).catch(function(){});
     }
-    await db.query('DELETE FROM room_backgrounds WHERE id=$1', [req.params.id]);
+    await db.query('DELETE FROM gifts WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// PATCH — تحديث عداد الاستخدام عند اختيار المستخدم خلفية
-app.patch('/api/backgrounds/:id/use', auth, async function(req, res) {
+app.patch('/api/admin/gifts/:id/toggle', adminAuth, async function(req, res) {
   try {
-    await db.query('UPDATE room_backgrounds SET used_count = used_count + 1 WHERE id=$1', [req.params.id]);
-    res.json({ ok: true });
+    var r = await db.query('UPDATE gifts SET is_active = NOT is_active WHERE id=$1 RETURNING is_active', [req.params.id]);
+    res.json({ is_active: r.rows[0].is_active });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Admin: إحصائيات الهدايا ──
+app.get('/api/admin/gift-stats', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query(`
+      SELECT 
+        COUNT(*) as total_transactions,
+        SUM(total_beans) as total_beans_gifted,
+        SUM(app_cut) as total_app_earnings
+      FROM gift_transactions
+    `);
+    res.json(r.rows[0]);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ═══ SOCKET ═══
 var onlineUsers = {};
@@ -1693,6 +1816,18 @@ io.on('connection', function(socket) {
     } catch(e) {}
   });
 
+  socket.on('room_gift', function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.gift) return;
+    var key = 'room_' + data.room_id;
+    // بث للجميع في الغرفة ماعدا المرسل
+    socket.to(key).emit('room_gift', {
+      room_id:     data.room_id,
+      gift:        data.gift,
+      receiver_id: data.receiver_id,
+      sender_name: data.sender_name || ''
+    });
+  });
+
   socket.on('leave_room', function(data) {
     if (!data || !data.room_id) return;
     var key = 'room_' + data.room_id;
@@ -1847,4 +1982,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
