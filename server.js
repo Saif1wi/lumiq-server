@@ -105,32 +105,6 @@ async function initDB() {
     PRIMARY KEY(user_id, notification_id)
   )`);
 
-  // ═══ ROOMS ═══
-  await db.query(`CREATE TABLE IF NOT EXISTS rooms (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    creator_id INT REFERENCES users(id) ON DELETE SET NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-  )`);
-  // إضافة عمود room_code إذا لم يكن موجوداً
-  await db.query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS room_code TEXT UNIQUE`).catch(function(){});
-  // توليد كود للغرف الموجودة التي لا تملك كوداً
-  await db.query(`
-    UPDATE rooms SET room_code = LPAD(FLOOR(RANDOM() * 900000 + 100000)::TEXT, 6, '0')
-    WHERE room_code IS NULL
-  `).catch(function(){});
-
-  await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
-    id SERIAL PRIMARY KEY,
-    room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
-    sender_id INT REFERENCES users(id) ON DELETE CASCADE,
-    text TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-  )`);
-
-  await db.query('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room_id)').catch(function(){});
-
 
   await db.query(`CREATE TABLE IF NOT EXISTS slides (
     id SERIAL PRIMARY KEY,
@@ -174,58 +148,11 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS battery_level INT DEFAULT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_battery BOOLEAN DEFAULT true",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
-    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS beans INT DEFAULT 0",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily_beans TIMESTAMP DEFAULT NULL"
+    "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
   }
-
-  // جداول نظام الهدايا
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS gifts (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      image_url TEXT NOT NULL,
-      public_id TEXT,
-      price INT NOT NULL DEFAULT 10,
-      is_active BOOLEAN DEFAULT true,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `).catch(function(){});
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS gift_transactions (
-      id SERIAL PRIMARY KEY,
-      gift_id INT REFERENCES gifts(id) ON DELETE SET NULL,
-      sender_id INT REFERENCES users(id) ON DELETE CASCADE,
-      receiver_id INT REFERENCES users(id) ON DELETE CASCADE,
-      room_id INT REFERENCES rooms(id) ON DELETE SET NULL,
-      total_beans INT NOT NULL,
-      receiver_cut INT NOT NULL,
-      room_cut INT NOT NULL,
-      app_cut INT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `).catch(function(){});
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS gift_settings (
-      id INT PRIMARY KEY DEFAULT 1,
-      receiver_pct INT DEFAULT 50,
-      room_pct INT DEFAULT 30,
-      app_pct INT DEFAULT 20,
-      daily_beans INT DEFAULT 50
-    )
-  `).catch(function(){});
-
-  // إدخال إعدادات افتراضية إذا ما موجودة
-  await db.query(`
-    INSERT INTO gift_settings (id, receiver_pct, room_pct, app_pct, daily_beans)
-    VALUES (1, 50, 30, 20, 50)
-    ON CONFLICT (id) DO NOTHING
-  `).catch(function(){});
 
   console.log('✅ DB ready');
 }
@@ -294,33 +221,13 @@ app.use(function(req, res, next) {
   next();
 });
 
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
+app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
 app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 
 // ═══ STATIC ═══
 app.get('/api/ping', function(req, res) { res.json({ ok: true }); });
 
-// endpoint مؤقت لإنشاء جداول الغرف يدوياً
-app.get('/api/setup-rooms', async function(req, res) {
-  try {
-    await db.query(`DROP TABLE IF EXISTS room_messages CASCADE`);
-    await db.query(`DROP TABLE IF EXISTS rooms CASCADE`);
-    await db.query(`CREATE TABLE rooms (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT DEFAULT '',
-      creator_id INT REFERENCES users(id) ON DELETE SET NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    )`);
-    await db.query(`CREATE TABLE room_messages (
-      id SERIAL PRIMARY KEY,
-      room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
-      sender_id INT REFERENCES users(id) ON DELETE CASCADE,
-      text TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    )`);
-    await db.query('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room_id)').catch(function(){});
     res.json({ ok: true, msg: 'Rooms tables recreated successfully' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -387,7 +294,6 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'No token' });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
-    req.userId = req.user.id; // FIX
     next();
   } catch(e) {
     res.status(401).json({ error: 'Invalid token' });
@@ -1067,7 +973,7 @@ app.get('/api/admin/users', adminAuth, async function(req, res) {
     var page   = parseInt(req.query.page) || 1;
     var search = req.query.search ? '%' + req.query.search + '%' : '%';
     var r      = await db.query(
-      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason,COALESCE(beans,0) as beans FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
+      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
       [search, (page-1)*50]
     );
     res.json(r.rows); // FIX: array مباشرة
@@ -1236,33 +1142,6 @@ app.post('/api/admin/users/:id/password', adminAuth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══ إضافة / خصم فاصولياء لمستخدم (أدمن) ═══
-app.post('/api/admin/users/:id/beans', adminAuth, async function(req, res) {
-  try {
-    var uid    = parseInt(req.params.id);
-    var amount = parseInt(req.body.amount);
-    if (isNaN(uid) || isNaN(amount) || amount === 0) {
-      return res.status(400).json({ error: 'قيمة غير صالحة' });
-    }
-    var userQ = await db.query('SELECT id, name, beans FROM users WHERE id=$1', [uid]);
-    if (!userQ.rows.length) return res.status(404).json({ error: 'المستخدم غير موجود' });
-
-    var currentBeans = parseInt(userQ.rows[0].beans) || 0;
-    var newBeans = Math.max(0, currentBeans + amount);
-
-    await db.query('UPDATE users SET beans=$1 WHERE id=$2', [newBeans, uid]);
-
-    var socketId = onlineUsers[String(uid)];
-    if (socketId) {
-      io.to(socketId).emit('beans_update', { beans: newBeans });
-    }
-
-    res.json({ ok: true, beans: newBeans, name: userQ.rows[0].name, added: amount });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 app.delete('/api/admin/users/:id/photo', adminAuth, async function(req, res) {
   try {
     await db.query("UPDATE users SET photo_url='' WHERE id=$1", [req.params.id]);
@@ -1328,324 +1207,8 @@ app.get('/api/admin/online', adminAuth, function(req, res) {
 });
 
 // ═══ ROOMS API ═══
-app.get('/api/rooms', auth, async function(req, res) {
-  try {
-    var result = await db.query(`
-      SELECT r.*, u.name as creator_name,
-        (SELECT COUNT(*) FROM room_messages WHERE room_id = r.id) as message_count
-      FROM rooms r
-      LEFT JOIN users u ON u.id = r.creator_id
-      ORDER BY r.created_at DESC
-    `);
-    res.json(result.rows);
-  } catch(e) {
-    // إذا الجدول غير موجود أعد مصفوفة فارغة بعد إنشاء الجداول
-    if (e.message && e.message.includes('does not exist')) {
-      try {
-        await db.query(`CREATE TABLE IF NOT EXISTS rooms (
-          id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
-          creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
-        )`);
-        await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
-          id SERIAL PRIMARY KEY, room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
-          sender_id INT REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW()
-        )`);
-        return res.json([]);
-      } catch(e2) { return res.status(500).json({ error: e2.message }); }
-    }
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/api/rooms/search', auth, async function(req, res) {
-  try {
-    var code = (req.query.code || '').trim();
-    if (!code) return res.status(400).json({ error: 'أدخل كود الغرفة' });
-    var result = await db.query(`
-      SELECT r.*, u.name as creator_name,
-        (SELECT COUNT(*) FROM room_messages WHERE room_id = r.id) as message_count
-      FROM rooms r
-      LEFT JOIN users u ON u.id = r.creator_id
-      WHERE r.room_code = $1
-    `, [code]);
-    if (!result.rows.length) return res.status(404).json({ error: 'لم يتم العثور على غرفة بهذا الكود' });
-    res.json(result.rows[0]);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/rooms', auth, async function(req, res) {
-  try {
-    var name = (req.body.name || '').trim();
-    var description = (req.body.description || '').trim();
-    if (!name) return res.status(400).json({ error: 'اسم الغرفة مطلوب' });
-    // توليد كود 6 أرقام فريد
-    var roomCode = String(Math.floor(100000 + Math.random() * 900000));
-    var result = await db.query(
-      'INSERT INTO rooms (name, description, creator_id, room_code) VALUES ($1,$2,$3,$4) RETURNING *',
-      [name, description, req.userId, roomCode]
-    );
-    res.json(result.rows[0]);
-  } catch(e) {
-    console.error('POST /api/rooms error:', e.message);
-    // إذا الجدول غير موجود ننشئه ثم نعيد المحاولة
-    if (e.message && e.message.includes('relation') && e.message.includes('does not exist')) {
-      try {
-        await db.query(`CREATE TABLE IF NOT EXISTS rooms (
-          id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',
-          room_code TEXT UNIQUE,
-          creator_id INT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMP DEFAULT NOW()
-        )`);
-        await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
-          id SERIAL PRIMARY KEY, room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
-          sender_id INT REFERENCES users(id) ON DELETE CASCADE, text TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW()
-        )`);
-        var name2 = (req.body.name || '').trim();
-        var desc2 = (req.body.description || '').trim();
-        var code2 = String(Math.floor(100000 + Math.random() * 900000));
-        var result2 = await db.query(
-          'INSERT INTO rooms (name, description, creator_id, room_code) VALUES ($1,$2,$3,$4) RETURNING *',
-          [name2, desc2, req.userId, code2]
-        );
-        return res.json(result2.rows[0]);
-      } catch(e2) { return res.status(500).json({ error: e2.message }); }
-    }
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// حذف كل الغرف — GET للسهولة (استخدمه مرة واحدة)
-app.get('/api/admin/rooms/clear', adminAuth, async function(req, res) {
-  try {
-    await db.query('DELETE FROM room_messages');
-    await db.query('DELETE FROM rooms');
-    res.json({ ok: true, message: 'تم حذف جميع الغرف ✅' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async function(req, res) {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
-    var b64r = req.file.buffer.toString('base64');
-    var uploaded = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64r, {
-      folder: 'rooms', transformation: [{ width: 400, height: 400, crop: 'fill' }]
-    });
-    await db.query('ALTER TABLE rooms ADD COLUMN IF NOT EXISTS photo_url TEXT').catch(function(){});
-    await db.query('UPDATE rooms SET photo_url=$1 WHERE id=$2', [uploaded.secure_url, req.params.roomId]);
-    res.json({ photo_url: uploaded.secure_url });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
-  try {
-    var result = await db.query(`
-      SELECT rm.*, u.name as sender_name, u.username as sender_username, u.photo_url as sender_photo
-      FROM room_messages rm
-      JOIN users u ON u.id = rm.sender_id
-      WHERE rm.room_id = $1
-      ORDER BY rm.created_at ASC
-      LIMIT 100
-    `, [req.params.roomId]);
-    res.json(result.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
 
 
-
-
-// ══════════════════════════════════════
-// نظام الهدايا والفاصولياء
-// ══════════════════════════════════════
-
-// GET — رصيد المستخدم
-app.get('/api/me/beans', auth, async function(req, res) {
-  try {
-    var r = await db.query('SELECT beans FROM users WHERE id=$1', [req.userId]);
-    res.json({ beans: r.rows[0] ? r.rows[0].beans : 0 });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// POST — جمع الفاصولياء اليومية
-app.post('/api/me/daily-beans', auth, async function(req, res) {
-  try {
-    var settings = await db.query('SELECT daily_beans FROM gift_settings WHERE id=1');
-    var daily = settings.rows[0] ? settings.rows[0].daily_beans : 50;
-    var user = await db.query('SELECT beans, last_daily_beans FROM users WHERE id=$1', [req.userId]);
-    if (!user.rows.length) return res.status(404).json({ error: 'مستخدم غير موجود' });
-    var lastClaim = user.rows[0].last_daily_beans;
-    var now = new Date();
-    if (lastClaim) {
-      var last = new Date(lastClaim);
-      var diffHours = (now - last) / (1000 * 60 * 60);
-      if (diffHours < 24) {
-        var nextIn = Math.ceil(24 - diffHours);
-        return res.status(400).json({ error: 'جمعت فاصولياءك اليوم', next_in_hours: nextIn });
-      }
-    }
-    var updated = await db.query(
-      'UPDATE users SET beans = beans + $1, last_daily_beans = NOW() WHERE id=$2 RETURNING beans',
-      [daily, req.userId]
-    );
-    res.json({ beans: updated.rows[0].beans, earned: daily });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// GET — قائمة الهدايا المتاحة
-app.get('/api/gifts', auth, async function(req, res) {
-  try {
-    var r = await db.query('SELECT * FROM gifts WHERE is_active=true ORDER BY price ASC');
-    res.json(r.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// POST — إرسال هدية
-app.post('/api/gifts/send', auth, async function(req, res) {
-  try {
-    var gift_id   = parseInt(req.body.gift_id);
-    var receiver_id = parseInt(req.body.receiver_id);
-    var room_id   = req.body.room_id ? parseInt(req.body.room_id) : null;
-
-    if (!gift_id || !receiver_id) return res.status(400).json({ error: 'بيانات ناقصة' });
-    if (receiver_id === req.userId) return res.status(400).json({ error: 'لا تستطيع إرسال هدية لنفسك' });
-
-    // جلب الهدية والإعدادات والمستخدم
-    var [giftQ, settingsQ, senderQ] = await Promise.all([
-      db.query('SELECT * FROM gifts WHERE id=$1 AND is_active=true', [gift_id]),
-      db.query('SELECT * FROM gift_settings WHERE id=1'),
-      db.query('SELECT beans FROM users WHERE id=$1', [req.userId])
-    ]);
-
-    if (!giftQ.rows.length) return res.status(404).json({ error: 'الهدية غير موجودة' });
-    var gift = giftQ.rows[0];
-    var settings = settingsQ.rows[0] || { receiver_pct: 50, room_pct: 30, app_pct: 20 };
-    var sender = senderQ.rows[0];
-
-    if (!sender || sender.beans < gift.price) {
-      return res.status(400).json({ error: 'رصيدك غير كافٍ', beans: sender ? sender.beans : 0 });
-    }
-
-    // حساب التوزيع
-    var total = gift.price;
-    var receiver_cut = Math.floor(total * settings.receiver_pct / 100);
-    var room_cut     = Math.floor(total * settings.room_pct / 100);
-    var app_cut      = total - receiver_cut - room_cut;
-
-    // خصم من المرسل + إضافة للمتلقي
-    await db.query('UPDATE users SET beans = beans - $1 WHERE id=$2', [total, req.userId]);
-    await db.query('UPDATE users SET beans = beans + $1 WHERE id=$2', [receiver_cut, receiver_id]);
-
-    // إضافة لصاحب الغرفة إذا موجود
-    if (room_id) {
-      var roomQ = await db.query('SELECT creator_id FROM rooms WHERE id=$1', [room_id]);
-      if (roomQ.rows.length && roomQ.rows[0].creator_id && roomQ.rows[0].creator_id !== receiver_id) {
-        await db.query('UPDATE users SET beans = beans + $1 WHERE id=$2', [room_cut, roomQ.rows[0].creator_id]);
-      }
-    }
-
-    // تسجيل المعاملة
-    await db.query(
-      'INSERT INTO gift_transactions (gift_id,sender_id,receiver_id,room_id,total_beans,receiver_cut,room_cut,app_cut) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [gift_id, req.userId, receiver_id, room_id, total, receiver_cut, room_cut, app_cut]
-    );
-
-    // جلب بيانات المرسل للإشعار
-    var senderInfo = await db.query('SELECT name, username, photo_url FROM users WHERE id=$1', [req.userId]);
-    var senderData = senderInfo.rows[0] || {};
-
-    // رصيد المرسل الجديد
-    var newBalance = await db.query('SELECT beans FROM users WHERE id=$1', [req.userId]);
-
-    res.json({
-      ok: true,
-      beans: newBalance.rows[0].beans,
-      gift: gift,
-      receiver_cut: receiver_cut,
-      room_cut: room_cut,
-      app_cut: app_cut,
-      sender: senderData
-    });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── Admin: إعدادات النسب ──
-app.get('/api/admin/gift-settings', adminAuth, async function(req, res) {
-  try {
-    var r = await db.query('SELECT * FROM gift_settings WHERE id=1');
-    res.json(r.rows[0] || { receiver_pct:50, room_pct:30, app_pct:20, daily_beans:50 });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.put('/api/admin/gift-settings', adminAuth, async function(req, res) {
-  try {
-    var { receiver_pct, room_pct, app_pct, daily_beans } = req.body;
-    var total = (receiver_pct||0) + (room_pct||0) + (app_pct||0);
-    if (total !== 100) return res.status(400).json({ error: 'مجموع النسب يجب أن يساوي 100' });
-    await db.query(
-      'UPDATE gift_settings SET receiver_pct=$1, room_pct=$2, app_pct=$3, daily_beans=$4 WHERE id=1',
-      [receiver_pct, room_pct, app_pct, daily_beans]
-    );
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── Admin: إدارة الهدايا ──
-app.get('/api/admin/gifts', adminAuth, async function(req, res) {
-  try {
-    var r = await db.query('SELECT * FROM gifts ORDER BY created_at DESC');
-    res.json(r.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/admin/gifts', adminAuth, upload.single('image'), async function(req, res) {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
-    var name  = (req.body.name || '').trim();
-    var price = parseInt(req.body.price) || 10;
-    if (!name) return res.status(400).json({ error: 'اسم الهدية مطلوب' });
-    var b64 = req.file.buffer.toString('base64');
-    var uploaded = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
-      folder: 'gifts'
-    });
-    var r = await db.query(
-      'INSERT INTO gifts (name, image_url, public_id, price) VALUES ($1,$2,$3,$4) RETURNING *',
-      [name, uploaded.secure_url, uploaded.public_id, price]
-    );
-    res.json(r.rows[0]);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/admin/gifts/:id', adminAuth, async function(req, res) {
-  try {
-    var g = await db.query('SELECT public_id FROM gifts WHERE id=$1', [req.params.id]);
-    if (g.rows.length && g.rows[0].public_id) {
-      await cloudinary.uploader.destroy(g.rows[0].public_id).catch(function(){});
-    }
-    await db.query('DELETE FROM gifts WHERE id=$1', [req.params.id]);
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.patch('/api/admin/gifts/:id/toggle', adminAuth, async function(req, res) {
-  try {
-    var r = await db.query('UPDATE gifts SET is_active = NOT is_active WHERE id=$1 RETURNING is_active', [req.params.id]);
-    res.json({ is_active: r.rows[0].is_active });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ── Admin: إحصائيات الهدايا ──
-app.get('/api/admin/gift-stats', adminAuth, async function(req, res) {
-  try {
-    var r = await db.query(`
-      SELECT 
-        COUNT(*) as total_transactions,
-        SUM(total_beans) as total_beans_gifted,
-        SUM(app_cut) as total_app_earnings
-      FROM gift_transactions
-    `);
-    res.json(r.rows[0]);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
 
 // ═══ SOCKET ═══
 var onlineUsers = {};
@@ -1668,11 +1231,11 @@ io.on('connection', function(socket) {
 
       chats.rows.forEach(function(c) { socket.join(c.id); });
 
-      // أرسل user_online فقط للمستخدمين في نفس الغرف (وليس broadcast للكل)
-      var roomIds = chats.rows.map(function(c) { return c.id; });
-      if (roomIds.length > 0) {
-        roomIds.forEach(function(rid) {
-          socket.to(rid).emit('user_online', { user_id: user.id, is_online: true });
+      // أرسل user_online فقط للمستخدمين في نفس المحادثات
+      var chatIds = chats.rows.map(function(c) { return c.id; });
+      if (chatIds.length > 0) {
+        chatIds.forEach(function(cid) {
+          socket.to(cid).emit('user_online', { user_id: user.id, is_online: true });
         });
       }
 
@@ -1690,8 +1253,6 @@ io.on('connection', function(socket) {
 
       if (pending.rows.length > 0) socket.emit('pending_notifications', pending.rows);
       if (pendingFriends.rows.length > 0) socket.emit('pending_friend_requests', pendingFriends.rows);
-
-      socket.emit('join_ok');
 
     } catch(e) { console.error('join error:', e.message); }
   });
@@ -1816,163 +1377,8 @@ io.on('connection', function(socket) {
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
   // ══ نظام Audio Relay — بديل WebRTC ══
-  // استقبال chunk صوتي من مستخدم وبثه لكل من في نفس الغرفة
-  socket.on('room_audio_chunk', function(data) {
-    if (!socket.userId || !data || !data.room_id || !data.chunk) return;
-    var key = 'room_' + data.room_id;
-    // أرسل للجميع في الغرفة ما عدا المرسل
-    socket.to(key).emit('room_audio_chunk', {
-      chunk:     data.chunk,
-      sender_id: socket.userId,
-      socket_id: socket.id,
-      room_id:   data.room_id
-    });
-  });
-
-  // ═══ ROOM SOCKET EVENTS ═══
-  socket.on('join_room', async function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    var key = 'room_' + data.room_id;
-    socket.join(key);
-    var room = io.sockets.adapter.rooms.get(key);
-    var count = room ? room.size : 1;
-    io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
-    // رسالة ترحيب لباقي الأعضاء (مش للشخص نفسه)
-    try {
-      var uQ = await db.query('SELECT name, photo_url, is_verified FROM users WHERE id=$1', [socket.userId]);
-      if (uQ.rows.length) {
-        var u = uQ.rows[0];
-        socket.to(key).emit('room_user_join', {
-          room_id:    data.room_id,
-          user_id:    socket.userId,
-          name:       u.name,
-          photo_url:  u.photo_url || null,
-          is_verified: !!u.is_verified
-        });
-      }
-    } catch(e) {}
-  });
-
-  socket.on('room_gift', function(data) {
-    if (!socket.userId || !data || !data.room_id || !data.gift) return;
-    var key = 'room_' + data.room_id;
-    // بث للجميع في الغرفة ماعدا المرسل
-    socket.to(key).emit('room_gift', {
-      room_id:     data.room_id,
-      gift:        data.gift,
-      receiver_id: data.receiver_id,
-      sender_name: data.sender_name || ''
-    });
-  });
-
-  socket.on('leave_room', function(data) {
-    if (!data || !data.room_id) return;
-    var key = 'room_' + data.room_id;
-    socket.leave(key);
-    var room = io.sockets.adapter.rooms.get(key);
-    var count = room ? room.size : 0;
-    if (count > 0) io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
-  });
-
-  socket.on('room_message', async function(data) {
-    if (!socket.userId || !data || !data.room_id || !data.text) return;
-    try {
-      var text = String(data.text).trim().slice(0, 2000);
-      if (!text) return;
-      var result = await db.query(
-        'INSERT INTO room_messages (room_id, sender_id, text) VALUES ($1,$2,$3) RETURNING *',
-        [data.room_id, socket.userId, text]
-      );
-      var msg = result.rows[0];
-      var userQ = await db.query('SELECT name, username, photo_url FROM users WHERE id=$1', [socket.userId]);
-      if (!userQ.rows.length) return;
-      var u = userQ.rows[0];
-      io.to('room_' + data.room_id).emit('room_message', {
-        id: msg.id,
-        room_id: msg.room_id,
-        sender_id: socket.userId,
-        sender_name: u.name,
-        sender_username: u.username,
-        sender_photo: u.photo_url,
-        text: msg.text,
-        created_at: msg.created_at
-      });
-    } catch(e) { console.error('room_message error:', e.message); }
-  });
-
-  // ── MIC SLOTS ──
-  if (!global.roomMicSlots)   global.roomMicSlots   = {};
-  if (!global.roomMicSockets) global.roomMicSockets = {};
-
-  socket.on('room_mic_join', function(data) {
-    if (!socket.userId || !data || !data.room_id || !data.slot || !data.user) return;
-    var key = 'room_' + data.room_id;
-    if (!global.roomMicSlots[key])   global.roomMicSlots[key]   = {1:null,2:null,3:null,4:null,5:null};
-    if (!global.roomMicSockets[key]) global.roomMicSockets[key] = {};
-    for (var s = 1; s <= 5; s++) {
-      if (global.roomMicSlots[key][s] && global.roomMicSlots[key][s].id === socket.userId)
-        global.roomMicSlots[key][s] = null;
-    }
-    global.roomMicSlots[key][data.slot] = { id: socket.userId, name: data.user.name, avatar: data.user.avatar || null };
-    global.roomMicSockets[key][socket.id] = true;
-    io.to(key).emit('room_mic_join', { room_id: data.room_id, slot: data.slot, user: global.roomMicSlots[key][data.slot], socket_id: socket.id });
-  });
-
-  socket.on('room_mic_leave', function(data) {
-    if (!data || !data.room_id || !data.slot) return;
-    var key = 'room_' + data.room_id;
-    if (global.roomMicSlots  && global.roomMicSlots[key])   global.roomMicSlots[key][data.slot] = null;
-    if (global.roomMicSockets && global.roomMicSockets[key]) delete global.roomMicSockets[key][socket.id];
-    io.to(key).emit('room_mic_leave', { room_id: data.room_id, slot: data.slot, socket_id: socket.id });
-  });
-
-  socket.on('room_mics_request', function(data) {
-    if (!data || !data.room_id) return;
-    var key = 'room_' + data.room_id;
-    var slots = (global.roomMicSlots && global.roomMicSlots[key]) || {1:null,2:null,3:null,4:null,5:null};
-    socket.emit('room_mics_state', { room_id: data.room_id, slots: slots });
-  });
-
-  socket.on('room_members_request', async function(data) {
-    if (!data || !data.room_id) return;
-    var key = 'room_' + data.room_id;
-    var room = io.sockets.adapter.rooms.get(key);
-    var count = room ? room.size : 1;
-    io.to(key).emit('room_members_count', { room_id: data.room_id, count: count });
-    // إرسال قائمة الأعضاء مع بياناتهم
-    try {
-      if (room) {
-        var memberIds = [];
-        room.forEach(function(sid) {
-          var s = io.sockets.sockets.get(sid);
-          if (s && s.userId) memberIds.push(s.userId);
-        });
-        if (memberIds.length) {
-          var uQ = await db.query(
-            'SELECT id, name, username, photo_url, is_verified FROM users WHERE id = ANY($1)',
-            [memberIds]
-          );
-          socket.emit('room_members_list', { room_id: data.room_id, members: uQ.rows });
-        }
-      }
-    } catch(e) {}
-  });
 
   socket.on('disconnect', async function() {
-    if (socket.userId && global.roomMicSlots) {
-      Object.keys(global.roomMicSlots).forEach(function(key) {
-        var slots = global.roomMicSlots[key];
-        for (var s = 1; s <= 5; s++) {
-          if (slots[s] && slots[s].id === socket.userId) {
-            slots[s] = null;
-            io.to(key).emit('room_mic_leave', { room_id: key.replace('room_',''), slot: s, socket_id: socket.id });
-          }
-        }
-      });
-      if (global.roomMicSockets) {
-        Object.keys(global.roomMicSockets).forEach(function(key) { delete global.roomMicSockets[key][socket.id]; });
-      }
-    }
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
     delete onlineUsers[String(socket.userId)];
