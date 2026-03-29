@@ -1066,7 +1066,7 @@ app.get('/api/admin/users', adminAuth, async function(req, res) {
     var page   = parseInt(req.query.page) || 1;
     var search = req.query.search ? '%' + req.query.search + '%' : '%';
     var r      = await db.query(
-      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason,beans FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
+      'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
       [search, (page-1)*50]
     );
     res.json(r.rows); // FIX: array مباشرة
@@ -1243,15 +1243,19 @@ app.post('/api/admin/users/:id/beans', adminAuth, async function(req, res) {
     if (isNaN(uid) || isNaN(amount) || amount === 0) {
       return res.status(400).json({ error: 'قيمة غير صالحة' });
     }
-    // تحقق أن المستخدم موجود
     var userQ = await db.query('SELECT id, name, beans FROM users WHERE id=$1', [uid]);
     if (!userQ.rows.length) return res.status(404).json({ error: 'المستخدم غير موجود' });
 
     var currentBeans = parseInt(userQ.rows[0].beans) || 0;
-    var newBeans = currentBeans + amount;
-    if (newBeans < 0) newBeans = 0; // لا تسمح بالسالب
+    var newBeans = Math.max(0, currentBeans + amount);
 
     await db.query('UPDATE users SET beans=$1 WHERE id=$2', [newBeans, uid]);
+
+    // إرسال تحديث فوري للمستخدم عبر socket إن كان متصلاً
+    if (onlineUsers[String(uid)]) {
+      io.to(onlineUsers[String(uid)]).emit('beans_update', { beans: newBeans });
+    }
+
     res.json({ ok: true, beans: newBeans, name: userQ.rows[0].name, added: amount });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
