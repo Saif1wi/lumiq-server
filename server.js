@@ -1378,33 +1378,44 @@ app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
     await db.query(`
       CREATE TABLE IF NOT EXISTS room_backgrounds (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        url TEXT NOT NULL,
+        name TEXT DEFAULT 'خلفية',
+        url TEXT DEFAULT '',
         public_id TEXT,
         used_count INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // إضافة الأعمدة الناقصة إذا الجدول كان موجوداً بهيكل قديم
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS url TEXT DEFAULT ''`).catch(function(){});
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS name TEXT DEFAULT 'خلفية'`).catch(function(){});
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS public_id TEXT`).catch(function(){});
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS used_count INT DEFAULT 0`).catch(function(){});
     console.log('room_backgrounds table ready');
   } catch(e) {
     console.error('room_backgrounds table error:', e.message);
   }
 })();
 
-// Route لإنشاء الجدول يدوياً من لوحة التحكم
+// Route لإنشاء/إصلاح الجدول من لوحة التحكم
 app.post('/api/admin/init-backgrounds', adminAuth, async function(req, res) {
   try {
+    // إضافة الأعمدة الناقصة إذا كان الجدول موجود بهيكل قديم
     await db.query(`
       CREATE TABLE IF NOT EXISTS room_backgrounds (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        url TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT 'خلفية',
+        url TEXT NOT NULL DEFAULT '',
         public_id TEXT,
         used_count INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
-    res.json({ ok: true });
+    // إضافة الأعمدة الناقصة إذا ما موجودة
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS url TEXT NOT NULL DEFAULT ''`).catch(function(){});
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'خلفية'`).catch(function(){});
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS public_id TEXT`).catch(function(){});
+    await db.query(`ALTER TABLE room_backgrounds ADD COLUMN IF NOT EXISTS used_count INT DEFAULT 0`).catch(function(){});
+    res.json({ ok: true, message: 'الجدول جاهز' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
