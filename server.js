@@ -1418,6 +1418,12 @@ app.post('/api/rooms', auth, async function(req, res) {
 app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async function(req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'لم يتم رفع صورة' });
+    // ✅ فقط صاحب الغرفة يستطيع تغيير الصورة
+    var roomCheck = await db.query('SELECT creator_id FROM rooms WHERE id=$1', [req.params.roomId]);
+    if (!roomCheck.rows.length) return res.status(404).json({ error: 'الغرفة غير موجودة' });
+    if (String(roomCheck.rows[0].creator_id) !== String(req.userId)) {
+      return res.status(403).json({ error: 'فقط صاحب الغرفة يستطيع تغيير الصورة' });
+    }
     var b64r = req.file.buffer.toString('base64');
     var uploaded = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64r, {
       folder: 'rooms', transformation: [{ width: 400, height: 400, crop: 'fill' }]
@@ -1428,9 +1434,55 @@ app.post('/api/rooms/:roomId/photo', auth, upload.single('photo'), async functio
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// معرض صور الغرفة — يرجع آخر 30 صورة رُفعت من مستخدمي الغرفة
+app.get('/api/rooms/gallery', auth, async function(req, res) {
+  // صور افتراضية جاهزة للاختيار
+  var defaultImages = [
+    'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1518020382113-a7e8fc38eac9?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1534796636912-3b95b3ab5986?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1475924156734-496f6cac6ec1?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1501854140801-50d01698950b?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1518173946687-a4c8892bbd9f?w=400&h=400&fit=crop',
+    'https://images.unsplash.com/photo-1682687220742-aba13b6e50ba?w=400&h=400&fit=crop'
+  ];
+  res.json({ images: defaultImages });
+});
+
+// تعيين صورة من المعرض للغرفة
+app.post('/api/rooms/:roomId/photo-url', auth, async function(req, res) {
+  try {
+    var photoUrl = (req.body.photo_url || '').trim();
+    if (!photoUrl) return res.status(400).json({ error: 'رابط الصورة مطلوب' });
+    // فقط صاحب الغرفة
+    var roomCheck = await db.query('SELECT creator_id FROM rooms WHERE id=$1', [req.params.roomId]);
+    if (!roomCheck.rows.length) return res.status(404).json({ error: 'الغرفة غير موجودة' });
+    if (String(roomCheck.rows[0].creator_id) !== String(req.userId)) {
+      return res.status(403).json({ error: 'فقط صاحب الغرفة يستطيع تغيير الصورة' });
+    }
+    await db.query('ALTER TABLE rooms ADD COLUMN IF NOT EXISTS photo_url TEXT').catch(function(){});
+    await db.query('UPDATE rooms SET photo_url=$1 WHERE id=$2', [photoUrl, req.params.roomId]);
+    res.json({ photo_url: photoUrl });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/rooms/:roomId/messages', auth, async function(req, res) {
-  // رسائل الغرفة مؤقتة (مثل لودو) — لا يوجد سجل محفوظ
-  res.json([]);
+  try {
+    var result = await db.query(`
+      SELECT rm.*, u.name as sender_name, u.username as sender_username, u.photo_url as sender_photo
+      FROM room_messages rm
+      JOIN users u ON u.id = rm.sender_id
+      WHERE rm.room_id = $1
+      ORDER BY rm.created_at ASC
+      LIMIT 100
+    `, [req.params.roomId]);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 
@@ -1861,20 +1913,23 @@ io.on('connection', function(socket) {
     try {
       var text = String(data.text).trim().slice(0, 2000);
       if (!text) return;
-      // رسائل مؤقتة — بث فقط بدون حفظ في DB (مثل لودو)
-      var userQ = await db.query('SELECT name, username, photo_url, is_verified FROM users WHERE id=$1', [socket.userId]);
+      var result = await db.query(
+        'INSERT INTO room_messages (room_id, sender_id, text) VALUES ($1,$2,$3) RETURNING *',
+        [data.room_id, socket.userId, text]
+      );
+      var msg = result.rows[0];
+      var userQ = await db.query('SELECT name, username, photo_url FROM users WHERE id=$1', [socket.userId]);
       if (!userQ.rows.length) return;
       var u = userQ.rows[0];
       io.to('room_' + data.room_id).emit('room_message', {
-        id:              Date.now(),
-        room_id:         data.room_id,
-        sender_id:       socket.userId,
-        sender_name:     u.name,
+        id: msg.id,
+        room_id: msg.room_id,
+        sender_id: socket.userId,
+        sender_name: u.name,
         sender_username: u.username,
-        sender_photo:    u.photo_url,
-        is_verified:     !!u.is_verified,
-        text:            text,
-        created_at:      new Date()
+        sender_photo: u.photo_url,
+        text: msg.text,
+        created_at: msg.created_at
       });
     } catch(e) { console.error('room_message error:', e.message); }
   });
