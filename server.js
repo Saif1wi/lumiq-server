@@ -7,6 +7,7 @@ const jwt        = require('jsonwebtoken');
 const cors       = require('cors');
 const multer     = require('multer');
 const cloudinary = require('cloudinary').v2;
+const { AccessToken } = require('livekit-server-sdk');
 
 // ═══ CONFIG ═══
 const JWT_SECRET    = process.env.JWT_SECRET    || (process.env.NODE_ENV === 'production' ? null : 'lumiq_secret_dev_only');
@@ -15,6 +16,11 @@ const DATABASE_URL  = process.env.DATABASE_URL  || 'postgresql://postgres:egNpBt
 const ADMIN_KEY     = process.env.ADMIN_KEY     || (process.env.NODE_ENV === 'production' ? null : 'dev_admin_key');
 if (!ADMIN_KEY) throw new Error('ADMIN_KEY environment variable is required in production');
 const PORT          = process.env.PORT          || 3000;
+
+// ─── LiveKit Config ───────────────────────────────────────────
+const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || '';
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || '';
+const LIVEKIT_URL        = process.env.LIVEKIT_URL        || '';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD  || 'dxahljm5o',
@@ -439,6 +445,97 @@ app.delete('/api/me', auth, async function(req, res) {
     await db.query('DELETE FROM users WHERE id=$1', [uid]);
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+});
+
+// ═══ LIVEKIT ═══
+
+// ─── Helper: توليد Token ───────────────────────────────────────
+function generateLiveKitToken(roomName, participantName, participantId, isAdmin) {
+  var at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+    identity: String(participantId),
+    name: participantName,
+    ttl: '2h',
+  });
+  at.addGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: true,
+    canSubscribe: true,
+    canPublishData: true,
+    roomAdmin: !!isAdmin,
+    roomCreate: true,
+  });
+  return at.toJwt();
+}
+
+// ─── Token لمكالمة فردية ──────────────────────────────────────
+app.post('/api/calls/token', auth, async function(req, res) {
+  try {
+    var userId   = req.user.id;
+    var userRow  = await db.query('SELECT name FROM users WHERE id=$1', [userId]);
+    var userName = userRow.rows[0] ? userRow.rows[0].name : 'مستخدم';
+    var roomName = s(req.body.room_name) || ('call_' + Date.now() + '_' + userId);
+
+    var token = await generateLiveKitToken(roomName, userName, userId, false);
+    return res.json({ token: token, room_name: roomName, livekit_url: LIVEKIT_URL });
+  } catch(e) {
+    console.error('LiveKit token error:', e.message);
+    return res.status(500).json({ error: 'فشل توليد رمز المكالمة' });
+  }
+});
+
+// ─── إنشاء مكالمة جماعية ─────────────────────────────────────
+app.post('/api/calls/group/create', auth, async function(req, res) {
+  try {
+    var callerId     = req.user.id;
+    var userRow      = await db.query('SELECT name FROM users WHERE id=$1', [callerId]);
+    var callerName   = userRow.rows[0] ? userRow.rows[0].name : 'مستخدم';
+    var participants = req.body.participants || [];
+    var callType     = s(req.body.call_type) || 'audio';
+    var roomName     = 'group_' + Date.now() + '_' + callerId;
+
+    if (!participants.length) return res.status(400).json({ error: 'يجب تحديد مشاركين' });
+
+    var callerToken = await generateLiveKitToken(roomName, callerName, callerId, true);
+
+    // إشعار كل مشارك عبر Socket.io
+    participants.forEach(function(participantId) {
+      var targetSocket = onlineUsers[String(participantId)];
+      if (targetSocket) {
+        io.to(targetSocket).emit('incoming_group_call', {
+          room_name:    roomName,
+          livekit_url:  LIVEKIT_URL,
+          caller_id:    callerId,
+          caller_name:  callerName,
+          call_type:    callType,
+          participants: participants,
+        });
+      }
+    });
+
+    return res.json({ token: callerToken, room_name: roomName, livekit_url: LIVEKIT_URL });
+  } catch(e) {
+    console.error('Group call error:', e.message);
+    return res.status(500).json({ error: 'فشل إنشاء المكالمة الجماعية' });
+  }
+});
+
+// ─── الانضمام لمكالمة جماعية ─────────────────────────────────
+app.post('/api/calls/group/join', auth, async function(req, res) {
+  try {
+    var userId   = req.user.id;
+    var userRow  = await db.query('SELECT name FROM users WHERE id=$1', [userId]);
+    var userName = userRow.rows[0] ? userRow.rows[0].name : 'مستخدم';
+    var roomName = s(req.body.room_name);
+
+    if (!roomName) return res.status(400).json({ error: 'room_name مطلوب' });
+
+    var token = await generateLiveKitToken(roomName, userName, userId, false);
+    return res.json({ token: token, room_name: roomName, livekit_url: LIVEKIT_URL });
+  } catch(e) {
+    console.error('Group join error:', e.message);
+    return res.status(500).json({ error: 'فشل الانضمام للمكالمة' });
+  }
 });
 
 // ═══ BLOCK ═══
@@ -1369,6 +1466,62 @@ io.on('connection', function(socket) {
       io.to(d.to_socket_id).emit('call_ended');
     } else if (d.to_user_id && onlineUsers[String(d.to_user_id)]) {
       io.to(onlineUsers[String(d.to_user_id)]).emit('call_ended');
+    }
+  });
+
+  // ─── LiveKit: مكالمة فردية واردة ────────────────────────────
+  socket.on('lk_call_invite', async function(d) {
+    if (!socket.userId || !d) return;
+    try {
+      var blocked = await db.query(
+        'SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)',
+        [socket.userId, d.to_user_id]
+      );
+      if (blocked.rows.length) {
+        socket.emit('call_failed', { reason: 'لا يمكن الاتصال بهذا المستخدم' });
+        return;
+      }
+      var targetSocket = onlineUsers[String(d.to_user_id)];
+      if (targetSocket) {
+        io.to(targetSocket).emit('lk_incoming_call', {
+          room_name:      d.room_name,
+          livekit_url:    d.livekit_url,
+          caller_id:      socket.userId,
+          caller_name:    d.caller_name,
+          call_type:      d.call_type || 'audio',
+          from_socket_id: socket.id,
+        });
+      } else {
+        socket.emit('call_failed', { reason: 'المستخدم غير متصل حالياً' });
+      }
+    } catch(e) {
+      console.error('lk_call_invite error:', e.message);
+    }
+  });
+
+  socket.on('lk_call_accept', function(d) {
+    if (!socket.userId || !d || !d.to_socket_id) return;
+    io.to(d.to_socket_id).emit('lk_call_accepted', { from_user_id: socket.userId });
+  });
+
+  socket.on('lk_call_reject', function(d) {
+    if (!socket.userId || !d) return;
+    var targetSocket = d.to_socket_id || (d.to_user_id && onlineUsers[String(d.to_user_id)]);
+    if (targetSocket) {
+      io.to(targetSocket).emit('lk_call_rejected', { reason: d.reason || 'rejected' });
+    }
+  });
+
+  socket.on('lk_call_end', function(d) {
+    if (!socket.userId || !d) return;
+    var targetSocket = d.to_socket_id || (d.to_user_id && onlineUsers[String(d.to_user_id)]);
+    if (targetSocket) io.to(targetSocket).emit('lk_call_ended');
+    // للمكالمات الجماعية
+    if (d.participants && Array.isArray(d.participants)) {
+      d.participants.forEach(function(pid) {
+        var ps = onlineUsers[String(pid)];
+        if (ps && ps !== socket.id) io.to(ps).emit('lk_call_ended');
+      });
     }
   });
 
