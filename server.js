@@ -117,8 +117,9 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
+  // إضافة سلايدات افتراضية إذا كان الجدول فارغاً
   var slidesCount = await db.query('SELECT COUNT(*) FROM slides');
-  if (parseInt(slidesCount.rows[0].count) === 0) {
+  if (parseInt(slidesCount.rows[0].count, 10) === 0) {
     await db.query(`INSERT INTO slides (title, subtitle, grad, sort_order) VALUES
       ('مرحباً في LUMIQ', 'تواصل بذكاء مع من تحب', 'sg1', 1),
       ('رسائل صوتية', 'اضغط مطولاً للتسجيل', 'sg2', 2),
@@ -127,6 +128,7 @@ async function initDB() {
     `);
   }
 
+
   // Indexes
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id)').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)').catch(function(){});
@@ -134,6 +136,7 @@ async function initDB() {
   await db.query('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)').catch(function(){});
 
+  // Alters للتوافق مع قواعد بيانات قديمة
   var alters = [
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT NULL",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT false",
@@ -156,6 +159,7 @@ async function initDB() {
 // ═══ HELPERS ═══
 function s(val) { return val ? String(val).trim() : ''; }
 
+// Rate Limiter
 var rateLimitStore = {};
 function rateLimit(max, windowMs) {
   return function(req, res, next) {
@@ -176,6 +180,7 @@ setInterval(function() {
   });
 }, 300000);
 
+// ═══ Helper: تحديث unread_count وآخر رسالة ═══
 async function updateChatMeta(chatId, senderId, lastMessage) {
   var chatRow = await db.query('SELECT participants, unread_count FROM chats WHERE id=$1', [chatId]);
   if (!chatRow.rows.length) return;
@@ -192,6 +197,7 @@ async function updateChatMeta(chatId, senderId, lastMessage) {
   );
 }
 
+// ═══ Helper: التحقق من الحظر بين مستخدمين ═══
 async function checkBlock(userA, userB) {
   var r = await db.query(
     'SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)',
@@ -205,6 +211,7 @@ const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*' } });
 
+// Security Headers
 app.use(function(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -389,7 +396,7 @@ app.post('/api/me/avatar', auth, rateLimit(10, 60000), upload.single('avatar'), 
     });
     await db.query('UPDATE users SET photo_url=$1 WHERE id=$2', [up.secure_url, req.user.id]);
     res.json({ photo_url: up.secure_url });
-  } catch(e) { res.status(500).json({ error: 'فشل رفع الصورة' }); }
+  } catch(e) { console.error(e); res.status(500).json({ error: 'فشل رفع الصورة' }); }
 });
 
 app.get('/api/users/search', auth, async function(req, res) {
@@ -411,6 +418,7 @@ app.get('/api/users/:id', auth, async function(req, res) {
     var r = await db.query('SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [uid]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
     var user = Object.assign({}, r.rows[0]);
+    // إذا هو حظرني → أخفِ بياناته
     var theyBlockedMe = await db.query('SELECT id FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [req.params.id, req.user.id]);
     if (theyBlockedMe.rows.length) {
       user.photo_url    = '';
@@ -598,6 +606,7 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
+    // تحقق من أن المستخدم عضو في المحادثة
     var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
     var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [chatId]);
@@ -614,6 +623,7 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
     var reply_to = req.body.reply_to;
     if (!text || !text.trim()) return res.status(400).json({ error: 'الرسالة فارغة' });
 
+    // التحقق من الحظر
     var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
     if (chatRow.rows.length) {
       var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
@@ -653,6 +663,7 @@ app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload
       transformation: [{ quality: 'auto', fetch_format: 'auto' }]
     });
 
+    // FIX 4: قبول reply_to مع الصورة
     var reply_to = req.body.reply_to || null;
     if (reply_to && typeof reply_to === 'string') { try { reply_to = JSON.parse(reply_to); } catch(e) { reply_to = null; } }
 
@@ -686,6 +697,7 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
       resource_type: 'video'
     });
 
+    // FIX 4: قبول reply_to مع الصوت
     var reply_to = req.body.reply_to || null;
     if (reply_to && typeof reply_to === 'string') { try { reply_to = JSON.parse(reply_to); } catch(e) { reply_to = null; } }
 
@@ -701,7 +713,7 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ═══ FORWARD ═══
+// ═══ FORWARD — يقبل URL مباشرة بدون re-upload ═══
 app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
   try {
     var chatId    = req.params.chatId;
@@ -711,6 +723,7 @@ app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
     var text      = req.body.text     || null;
     var duration  = parseInt(req.body.duration) || 0;
 
+    // التحقق من الحظر
     var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
     if (chatRow.rows.length) {
       var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
@@ -772,6 +785,7 @@ app.delete('/api/messages/:id', auth, async function(req, res) {
     if (!check.rows.length) return res.status(404).json({ error: 'غير موجود' });
     if (String(check.rows[0].sender_id) !== String(req.user.id)) return res.status(403).json({ error: 'غير مسموح' });
     await db.query('DELETE FROM messages WHERE id=$1', [msgId]);
+    // FIX: إرسال id بدلاً من msg_id ليتوافق مع الـ frontend
     io.to(check.rows[0].chat_id).emit('delete_message', { id: parseInt(req.params.id) });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
@@ -800,7 +814,9 @@ app.post('/api/chats/:chatId/read', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
+    // ── رد فوري للـ client بدون انتظار DB ──
     res.json({ ok: true });
+    // ── تحديث DB بشكل غير متزامن (لا يُبطئ تجربة المستخدم) ──
     db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)])
       .then(function(access) {
         if (!access.rows.length) return;
@@ -829,6 +845,7 @@ app.get('/api/notifications', auth, async function(req, res) {
       'SELECT n.*, (SELECT COUNT(*) FROM notification_reads nr WHERE nr.notification_id=n.id AND nr.user_id=$1) as is_read FROM notifications n ORDER BY n.created_at DESC LIMIT 50',
       [req.user.id]
     );
+    // FIX: إرجاع array مباشرة بدلاً من { notifications: [] }
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -850,7 +867,7 @@ app.post('/api/notifications/read', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ═══ SLIDES ═══
+// ═══ SLIDES (public + admin) ═══
 app.get('/api/slides', async function(req, res) {
   try {
     var r = await db.query('SELECT * FROM slides WHERE is_active=true ORDER BY sort_order ASC, id ASC');
@@ -954,7 +971,7 @@ app.get('/api/admin/users', adminAuth, async function(req, res) {
       'SELECT id,name,username,email,photo_url,is_online,is_banned,is_verified,last_seen,created_at,ban_reason FROM users WHERE username ILIKE $1 OR name ILIKE $1 OR email ILIKE $1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
       [search, (page-1)*50]
     );
-    res.json(r.rows);
+    res.json(r.rows); // FIX: array مباشرة
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -995,6 +1012,7 @@ app.post('/api/admin/users/:id/verify', adminAuth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// FIX: messages يُرجع image_url + audio_url + sender_photo + type filter
 app.get('/api/admin/messages', adminAuth, async function(req, res) {
   try {
     var type  = req.query.type || null;
@@ -1026,6 +1044,7 @@ app.get('/api/admin/images', adminAuth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// FIX: PUT users يدعم is_banned + is_verified + ban_reason
 app.put('/api/admin/users/:id', adminAuth, async function(req, res) {
   try {
     var b = req.body;
@@ -1072,12 +1091,14 @@ app.delete('/api/admin/chats/:id', adminAuth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// FIX: chats يُرجع أسماء وصور المستخدمين
 app.get('/api/admin/chats', adminAuth, async function(req, res) {
   try {
     var r = await db.query(
       'SELECT c.id,c.participants,c.last_message,c.last_message_at,(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) as msg_count FROM chats c ORDER BY c.last_message_at DESC NULLS LAST LIMIT 50'
     );
     var chats = r.rows;
+    // جلب بيانات المستخدمين لكل محادثة
     var allIds = [];
     chats.forEach(function(c) { if (c.participants) c.participants.forEach(function(p) { if (!allIds.includes(String(p))) allIds.push(String(p)); }); });
     var usersMap = {};
@@ -1192,6 +1213,8 @@ io.on('connection', function(socket) {
       socket.userId = user.id;
       onlineUsers[String(user.id)] = socket.id;
 
+      // ── أرسل user_online فقط لمن يهمه (أصحاب المحادثات) وليس للكل ──
+      // أولاً: انضم للغرف + حدّث DB بشكل متوازٍ
       var [chats] = await Promise.all([
         db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(user.id)]),
         db.query('UPDATE users SET is_online=true, last_seen=NOW() WHERE id=$1', [user.id])
@@ -1199,6 +1222,7 @@ io.on('connection', function(socket) {
 
       chats.rows.forEach(function(c) { socket.join(c.id); });
 
+      // أرسل user_online فقط للمستخدمين في نفس الغرف (وليس broadcast للكل)
       var roomIds = chats.rows.map(function(c) { return c.id; });
       if (roomIds.length > 0) {
         roomIds.forEach(function(rid) {
@@ -1206,6 +1230,7 @@ io.on('connection', function(socket) {
         });
       }
 
+      // الإشعارات وطلبات الصداقة بشكل متوازٍ
       var [pending, pendingFriends] = await Promise.all([
         db.query(
           'SELECT n.* FROM notifications n WHERE n.id NOT IN (SELECT notification_id FROM notification_reads WHERE user_id=$1) ORDER BY n.created_at ASC',
@@ -1228,6 +1253,7 @@ io.on('connection', function(socket) {
     socket.join(data.chat_id);
   });
 
+  // ── يستمع لرسالة صوتية ──
   socket.on('listening_voice', function(data) {
     if (!data || !data.chat_id) return;
     socket.to(data.chat_id).emit('partner_listening', {
@@ -1238,6 +1264,8 @@ io.on('connection', function(socket) {
     });
   });
 
+
+  // ── تحديث البطارية ──
   socket.on('battery_update', async function(data) {
     if (!socket.userId || data.level === undefined) return;
     var level = Math.round(Math.max(0, Math.min(100, Number(data.level))));
@@ -1247,6 +1275,15 @@ io.on('connection', function(socket) {
     } catch(e) {}
   });
 
+  // ── كشف السكرين شوت ──
+  socket.on('screenshot_taken', function(data) {
+    if (!socket.userId || !data || !data.chat_id) return;
+    socket.to(data.chat_id).emit('screenshot_taken', {
+      chat_id: data.chat_id,
+      user_id: socket.userId,
+    });
+  });
+
   socket.on('viewing_chat', function(data) {
     if (!data || !data.chat_id || !socket.userId) return;
     socket.to(data.chat_id).emit('partner_viewing', {
@@ -1254,15 +1291,6 @@ io.on('connection', function(socket) {
       chat_id:    data.chat_id,
       is_viewing: !!data.is_viewing,
       _reply:     !!data._reply
-    });
-  });
-
-  // ── إشعار السكرين شوت ── ✅ جديد
-  socket.on('screenshot_taken', function(data) {
-    if (!socket.userId || !data || !data.chat_id) return;
-    socket.to(data.chat_id).emit('screenshot_taken', {
-      chat_id: data.chat_id,
-      user_id: socket.userId,
     });
   });
 
@@ -1354,6 +1382,7 @@ io.on('connection', function(socket) {
     delete onlineUsers[String(socket.userId)];
     try {
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
+      // أرسل فقط للغرف المشتركة وليس broadcast للكل
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)]);
       var offline = { user_id: socket.userId, is_online: false, last_seen: new Date() };
       chats.rows.forEach(function(c) {
@@ -1369,12 +1398,14 @@ initDB().then(function() {
     console.log('🚀 LUMIQ Server running on port ' + PORT);
   });
 
+  // حذف الرسائل المؤقتة المنتهية كل 30 ثانية
   setInterval(async function() {
     try {
       var expired = await db.query("SELECT id, chat_id FROM messages WHERE expires_at IS NOT NULL AND expires_at < NOW()");
       if (!expired.rows.length) return;
       var ids = expired.rows.map(function(r) { return r.id; });
       await db.query('DELETE FROM messages WHERE id = ANY($1)', [ids]);
+      // تجميع حسب المحادثة وإرسال delete_message لكل رسالة
       var chatGroups = {};
       expired.rows.forEach(function(r) {
         if (!chatGroups[r.chat_id]) chatGroups[r.chat_id] = [];
@@ -1382,6 +1413,7 @@ initDB().then(function() {
       });
       Object.keys(chatGroups).forEach(function(cid) {
         chatGroups[cid].forEach(function(mid) {
+          // FIX: إرسال id ليتوافق مع الـ frontend
           io.to(cid).emit('delete_message', { id: mid });
         });
       });
