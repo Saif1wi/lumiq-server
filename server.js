@@ -732,35 +732,13 @@ app.get('/api/chats', auth, async function(req, res) {
 // ═══ MESSAGES ═══
 app.delete('/api/chats/:chatId/delete', auth, async function(req, res) {
   try {
-    var chatId     = req.params.chatId;
-    var forBoth    = req.query.for_both === 'true';
-    var chatRow    = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    var chatId  = req.params.chatId;
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
     if (!chatRow.rows.length) return res.status(404).json({ error: 'المحادثة غير موجودة' });
     if (!chatRow.rows[0].participants.includes(String(req.user.id))) return res.status(403).json({ error: 'غير مسموح' });
-
-    if (forBoth) {
-      // حذف عند الطرفين: حذف المحادثة والرسائل نهائياً
-      await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
-      await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
-      // إشعار الطرف الآخر أيضاً
-      io.to(chatId).emit('chat_deleted', { chat_id: chatId, for_both: true });
-    } else {
-      // حذف عند الطالب فقط: أزله من المشاركين
-      var others = chatRow.rows[0].participants.filter(function(p) {
-        return p !== String(req.user.id);
-      });
-      if (others.length === 0) {
-        // لا يوجد طرف آخر، احذف نهائياً
-        await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
-        await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
-      } else {
-        // أبقِ المحادثة للطرف الآخر وأزل المستخدم الحالي فقط
-        await db.query('UPDATE chats SET participants=$1 WHERE id=$2', [others, chatId]);
-      }
-      // أشعر المستخدم الحالي فقط
-      var mySocket = onlineUsers[String(req.user.id)];
-      if (mySocket) io.to(mySocket).emit('chat_deleted', { chat_id: chatId, for_both: false });
-    }
+    await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
+    await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
+    io.to(chatId).emit('chat_deleted', { chat_id: chatId });
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -1585,13 +1563,27 @@ io.on('connection', function(socket) {
 
       chats.rows.forEach(function(c) { socket.join(c.id); });
 
-      // أرسل user_online فقط للمستخدمين في نفس الغرف (وليس broadcast للكل)
+      // أرسل user_online لمن في نفس المحادثات
       var roomIds = chats.rows.map(function(c) { return c.id; });
       if (roomIds.length > 0) {
         roomIds.forEach(function(rid) {
           socket.to(rid).emit('user_online', { user_id: user.id, is_online: true });
         });
       }
+
+      // أرسل أيضاً لكل الأصدقاء المتصلين حتى لو ما في محادثة مشتركة
+      try {
+        var friends = await db.query(
+          'SELECT CASE WHEN requester_id=$1 THEN addressee_id ELSE requester_id END as friend_id FROM friendships WHERE (requester_id=$1 OR addressee_id=$1) AND status=$2',
+          [user.id, 'accepted']
+        );
+        friends.rows.forEach(function(f) {
+          var fSocket = onlineUsers[String(f.friend_id)];
+          if (fSocket) {
+            io.to(fSocket).emit('user_online', { user_id: user.id, is_online: true });
+          }
+        });
+      } catch(e) { console.error('friend online notify error:', e.message); }
 
       // الإشعارات وطلبات الصداقة بشكل متوازٍ
       var [pending, pendingFriends] = await Promise.all([
@@ -1667,13 +1659,33 @@ io.on('connection', function(socket) {
     }
   });
 
-  socket.on('messages_seen', function(data) {
+  socket.on('messages_seen', async function(data) {
     if (!socket.userId || !data || !data.chat_id) return;
     var now = new Date().toISOString();
+    var chatId = data.chat_id;
+
+    // ── صفّر unread_count في DB وعلّم الرسائل كمقروءة ──
+    try {
+      await db.query(
+        'UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false',
+        [chatId, socket.userId]
+      );
+      var chatRow = await db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [chatId]);
+      if (chatRow.rows.length) {
+        var uc = chatRow.rows[0].unread_count || {};
+        var ra = chatRow.rows[0].read_at || {};
+        uc[String(socket.userId)] = 0;
+        ra[String(socket.userId)] = now;
+        await db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3',
+          [JSON.stringify(uc), JSON.stringify(ra), chatId]);
+      }
+    } catch(e) { console.error('messages_seen DB error:', e.message); }
+
+    // ── أشعر الطرف الآخر ──
     if (data.partner_id && onlineUsers[String(data.partner_id)]) {
       io.to(onlineUsers[String(data.partner_id)]).emit('messages_seen', {
-        chat_id:   data.chat_id,
-        reader_id: data.reader_id,
+        chat_id:   chatId,
+        reader_id: socket.userId,
         read_at:   now
       });
     }
@@ -1835,6 +1847,18 @@ io.on('connection', function(socket) {
       chats.rows.forEach(function(c) {
         socket.to(c.id).emit('user_online', offline);
       });
+
+      // أشعر الأصدقاء المتصلين بالانقطاع
+      try {
+        var friends = await db.query(
+          'SELECT CASE WHEN requester_id=$1 THEN addressee_id ELSE requester_id END as friend_id FROM friendships WHERE (requester_id=$1 OR addressee_id=$1) AND status=$2',
+          [socket.userId, 'accepted']
+        );
+        friends.rows.forEach(function(f) {
+          var fSocket = onlineUsers[String(f.friend_id)];
+          if (fSocket) io.to(fSocket).emit('user_online', offline);
+        });
+      } catch(e) {}
 
       // مغادرة الغرفة الصوتية تلقائياً عند قطع الاتصال
       if (socket.currentVoiceRoom) {
