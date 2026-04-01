@@ -159,6 +159,42 @@ async function initDB() {
     await db.query(alters[i]).catch(function(){});
   }
 
+  // ─── جداول الغرف الصوتية العامة ──────────────────────────────
+  await db.query(`CREATE TABLE IF NOT EXISTS voice_rooms (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    cover_url TEXT DEFAULT '',
+    owner_id INT REFERENCES users(id) ON DELETE SET NULL,
+    max_seats INT DEFAULT 8,
+    is_private BOOLEAN DEFAULT false,
+    password TEXT DEFAULT NULL,
+    livekit_room TEXT UNIQUE NOT NULL,
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+
+  await db.query(`CREATE TABLE IF NOT EXISTS voice_room_seats (
+    id SERIAL PRIMARY KEY,
+    room_id INT REFERENCES voice_rooms(id) ON DELETE CASCADE,
+    seat_number INT NOT NULL,
+    user_id INT REFERENCES users(id) ON DELETE SET NULL,
+    is_muted BOOLEAN DEFAULT false,
+    joined_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(room_id, seat_number)
+  )`);
+
+  await db.query(`CREATE TABLE IF NOT EXISTS voice_room_messages (
+    id SERIAL PRIMARY KEY,
+    room_id INT REFERENCES voice_rooms(id) ON DELETE CASCADE,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+
+  await db.query('CREATE INDEX IF NOT EXISTS idx_voice_room_seats_room ON voice_room_seats(room_id)').catch(function(){});
+  await db.query('CREATE INDEX IF NOT EXISTS idx_voice_room_messages_room ON voice_room_messages(room_id, created_at DESC)').catch(function(){});
+
   console.log('✅ DB ready');
 }
 
@@ -1298,6 +1334,198 @@ app.get('/api/admin/online', adminAuth, function(req, res) {
   res.json({ count: Object.keys(onlineUsers).length, users: Object.keys(onlineUsers) });
 });
 
+// ═══ VOICE ROOMS API ═══
+
+// ─── قائمة الغرف الصوتية ──────────────────────────────────────
+app.get('/api/voice-rooms', auth, async function(req, res) {
+  try {
+    var rows = await db.query(`
+      SELECT vr.*, u.name as owner_name, u.photo_url as owner_photo,
+        (SELECT COUNT(*) FROM voice_room_seats WHERE room_id=vr.id AND user_id IS NOT NULL) as active_count
+      FROM voice_rooms vr
+      LEFT JOIN users u ON vr.owner_id = u.id
+      WHERE vr.status = 'active'
+      ORDER BY active_count DESC, vr.created_at DESC
+      LIMIT 50
+    `);
+    res.json(rows.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── إنشاء غرفة صوتية ────────────────────────────────────────
+app.post('/api/voice-rooms', auth, async function(req, res) {
+  try {
+    var userId = req.user.id;
+    var name = s(req.body.name) || 'غرفة جديدة';
+    var description = s(req.body.description) || '';
+    var maxSeats = parseInt(req.body.max_seats) || 8;
+    if (maxSeats < 2) maxSeats = 2;
+    if (maxSeats > 20) maxSeats = 20;
+    var isPrivate = req.body.is_private === true || req.body.is_private === 'true';
+    var password = isPrivate ? s(req.body.password) : null;
+    var livekitRoom = 'vr_' + Date.now() + '_' + userId;
+
+    var r = await db.query(
+      `INSERT INTO voice_rooms (name, description, owner_id, max_seats, is_private, password, livekit_room)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [name, description, userId, maxSeats, isPrivate, password, livekitRoom]
+    );
+    var room = r.rows[0];
+
+    // إنشاء المقاعد الفارغة
+    for (var i = 1; i <= maxSeats; i++) {
+      await db.query('INSERT INTO voice_room_seats (room_id, seat_number) VALUES ($1,$2)', [room.id, i]);
+    }
+
+    // توليد token للمالك
+    var userRow = await db.query('SELECT name FROM users WHERE id=$1', [userId]);
+    var userName = userRow.rows[0] ? userRow.rows[0].name : 'مستخدم';
+    var token = await generateLiveKitToken(livekitRoom, userName, userId, true);
+
+    // إخطار الكل عبر socket
+    io.emit('voice_room_created', { room: room });
+
+    res.json({ room: room, token: token, livekit_url: LIVEKIT_URL });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── الانضمام لغرفة صوتية ────────────────────────────────────
+app.post('/api/voice-rooms/:id/join', auth, async function(req, res) {
+  try {
+    var userId = req.user.id;
+    var roomId = parseInt(req.params.id);
+    var room = await db.query('SELECT * FROM voice_rooms WHERE id=$1 AND status=$2', [roomId, 'active']);
+    if (!room.rows.length) return res.status(404).json({ error: 'الغرفة غير موجودة' });
+    var r = room.rows[0];
+
+    if (r.is_private && r.password) {
+      var pass = s(req.body.password);
+      if (pass !== r.password) return res.status(403).json({ error: 'كلمة المرور خاطئة' });
+    }
+
+    // التحقق من وجود مقعد فارغ
+    var freeSeat = await db.query(
+      'SELECT * FROM voice_room_seats WHERE room_id=$1 AND user_id IS NULL ORDER BY seat_number ASC LIMIT 1',
+      [roomId]
+    );
+
+    var seatRow = null;
+    if (freeSeat.rows.length) {
+      // احجز المقعد
+      seatRow = await db.query(
+        'UPDATE voice_room_seats SET user_id=$1, is_muted=false, joined_at=NOW() WHERE id=$2 RETURNING *',
+        [userId, freeSeat.rows[0].id]
+      );
+      seatRow = seatRow.rows[0];
+    }
+
+    // جلب المقاعد الكاملة
+    var seats = await db.query(`
+      SELECT vs.*, u.name, u.photo_url, u.is_verified
+      FROM voice_room_seats vs
+      LEFT JOIN users u ON vs.user_id = u.id
+      WHERE vs.room_id = $1
+      ORDER BY vs.seat_number ASC
+    `, [roomId]);
+
+    // توليد token
+    var userRow = await db.query('SELECT name FROM users WHERE id=$1', [userId]);
+    var userName = userRow.rows[0] ? userRow.rows[0].name : 'مستخدم';
+    var token = await generateLiveKitToken(r.livekit_room, userName, userId, r.owner_id === userId);
+
+    // أخطر أعضاء الغرفة
+    io.to('vroom_' + roomId).emit('voice_room_user_joined', {
+      room_id: roomId, user_id: userId, seat: seatRow, seats: seats.rows
+    });
+
+    res.json({ token: token, livekit_url: LIVEKIT_URL, room: r, seats: seats.rows, my_seat: seatRow });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── مغادرة الغرفة ───────────────────────────────────────────
+app.post('/api/voice-rooms/:id/leave', auth, async function(req, res) {
+  try {
+    var userId = req.user.id;
+    var roomId = parseInt(req.params.id);
+
+    await db.query(
+      'UPDATE voice_room_seats SET user_id=NULL, is_muted=false WHERE room_id=$1 AND user_id=$2',
+      [roomId, userId]
+    );
+
+    var seats = await db.query(`
+      SELECT vs.*, u.name, u.photo_url, u.is_verified
+      FROM voice_room_seats vs LEFT JOIN users u ON vs.user_id=u.id
+      WHERE vs.room_id=$1 ORDER BY vs.seat_number ASC
+    `, [roomId]);
+
+    io.to('vroom_' + roomId).emit('voice_room_user_left', {
+      room_id: roomId, user_id: userId, seats: seats.rows
+    });
+
+    // إذا المالك خرج والغرفة فارغة → أغلق الغرفة
+    var room = await db.query('SELECT * FROM voice_rooms WHERE id=$1', [roomId]);
+    if (room.rows.length) {
+      var occupied = seats.rows.filter(function(s) { return s.user_id !== null; });
+      if (occupied.length === 0) {
+        await db.query("UPDATE voice_rooms SET status='closed' WHERE id=$1", [roomId]);
+        io.emit('voice_room_closed', { room_id: roomId });
+      }
+    }
+
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── كتم/رفع الصوت ───────────────────────────────────────────
+app.post('/api/voice-rooms/:id/mute', auth, async function(req, res) {
+  try {
+    var userId = req.user.id;
+    var roomId = parseInt(req.params.id);
+    var isMuted = req.body.is_muted === true || req.body.is_muted === 'true';
+    await db.query(
+      'UPDATE voice_room_seats SET is_muted=$1 WHERE room_id=$2 AND user_id=$3',
+      [isMuted, roomId, userId]
+    );
+    io.to('vroom_' + roomId).emit('voice_room_mute_changed', {
+      room_id: roomId, user_id: userId, is_muted: isMuted
+    });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── رسائل الغرفة ────────────────────────────────────────────
+app.get('/api/voice-rooms/:id/messages', auth, async function(req, res) {
+  try {
+    var roomId = parseInt(req.params.id);
+    var rows = await db.query(`
+      SELECT vm.*, u.name, u.photo_url, u.is_verified
+      FROM voice_room_messages vm JOIN users u ON vm.user_id=u.id
+      WHERE vm.room_id=$1 ORDER BY vm.created_at ASC LIMIT 100
+    `, [roomId]);
+    res.json(rows.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── تفاصيل غرفة واحدة ───────────────────────────────────────
+app.get('/api/voice-rooms/:id', auth, async function(req, res) {
+  try {
+    var roomId = parseInt(req.params.id);
+    var room = await db.query(`
+      SELECT vr.*, u.name as owner_name, u.photo_url as owner_photo
+      FROM voice_rooms vr LEFT JOIN users u ON vr.owner_id=u.id
+      WHERE vr.id=$1
+    `, [roomId]);
+    if (!room.rows.length) return res.status(404).json({ error: 'الغرفة غير موجودة' });
+    var seats = await db.query(`
+      SELECT vs.*, u.name, u.photo_url, u.is_verified
+      FROM voice_room_seats vs LEFT JOIN users u ON vs.user_id=u.id
+      WHERE vs.room_id=$1 ORDER BY vs.seat_number ASC
+    `, [roomId]);
+    res.json({ room: room.rows[0], seats: seats.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══ SOCKET ═══
 var onlineUsers = {};
 
@@ -1529,11 +1757,38 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
+
+  // ─── الانضمام لغرفة صوتية عبر Socket ────────────────────────
+  socket.on('join_voice_room', function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    socket.join('vroom_' + data.room_id);
+    socket.currentVoiceRoom = data.room_id;
+  });
+
+  socket.on('leave_voice_room', function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    socket.leave('vroom_' + data.room_id);
+    socket.currentVoiceRoom = null;
+  });
+
+  // ─── إرسال رسالة نصية داخل الغرفة الصوتية ────────────────────
+  socket.on('voice_room_message', async function(data) {
+    if (!socket.userId || !data || !data.room_id || !data.message) return;
+    try {
+      var msg = await db.query(
+        'INSERT INTO voice_room_messages (room_id, user_id, message) VALUES ($1,$2,$3) RETURNING *',
+        [data.room_id, socket.userId, String(data.message).slice(0, 500)]
+      );
+      var userRow = await db.query('SELECT name, photo_url, is_verified FROM users WHERE id=$1', [socket.userId]);
+      var full = Object.assign({}, msg.rows[0], userRow.rows[0] || {});
+      io.to('vroom_' + data.room_id).emit('voice_room_new_message', full);
+    } catch(e) { console.error('voice_room_message error:', e.message); }
+  });
+
   socket.on('disconnect', async function() {
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
-    delete onlineUsers[String(socket.userId)];
-    try {
+    delete onlineUsers[String(socket.userId)];\n    try {
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
       // أرسل فقط للغرف المشتركة وليس broadcast للكل
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)]);
@@ -1541,6 +1796,19 @@ io.on('connection', function(socket) {
       chats.rows.forEach(function(c) {
         socket.to(c.id).emit('user_online', offline);
       });
+
+      // مغادرة الغرفة الصوتية تلقائياً عند قطع الاتصال
+      if (socket.currentVoiceRoom) {
+        var rId = socket.currentVoiceRoom;
+        await db.query('UPDATE voice_room_seats SET user_id=NULL, is_muted=false WHERE room_id=$1 AND user_id=$2', [rId, socket.userId]);
+        var seats = await db.query(`SELECT vs.*, u.name, u.photo_url FROM voice_room_seats vs LEFT JOIN users u ON vs.user_id=u.id WHERE vs.room_id=$1 ORDER BY vs.seat_number`, [rId]);
+        io.to('vroom_' + rId).emit('voice_room_user_left', { room_id: rId, user_id: socket.userId, seats: seats.rows });
+        var occupied = seats.rows.filter(function(x) { return x.user_id !== null; });
+        if (occupied.length === 0) {
+          await db.query("UPDATE voice_rooms SET status='closed' WHERE id=$1", [rId]);
+          io.emit('voice_room_closed', { room_id: rId });
+        }
+      }
     } catch(e) { console.error('disconnect error:', e.message); }
   });
 });
