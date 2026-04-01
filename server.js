@@ -1788,7 +1788,8 @@ io.on('connection', function(socket) {
   socket.on('disconnect', async function() {
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
-    delete onlineUsers[String(socket.userId)];\n    try {
+    delete onlineUsers[String(socket.userId)];
+    try {
       await db.query('UPDATE users SET is_online=false, last_seen=NOW() WHERE id=$1', [socket.userId]);
       // أرسل فقط للغرف المشتركة وليس broadcast للكل
       var chats = await db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)]);
@@ -1845,4 +1846,3 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
-
