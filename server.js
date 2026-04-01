@@ -154,7 +154,14 @@ async function initDB() {
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_battery BOOLEAN DEFAULT true",
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
     "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'",
-    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS owner_id INT REFERENCES users(id) ON DELETE SET NULL"
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS owner_id INT REFERENCES users(id) ON DELETE SET NULL",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS cover_url TEXT DEFAULT ''",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS max_seats INT DEFAULT 8",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS is_private BOOLEAN DEFAULT false",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS password TEXT DEFAULT NULL",
+    "ALTER TABLE voice_rooms ADD COLUMN IF NOT EXISTS livekit_room TEXT"
   ];
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
