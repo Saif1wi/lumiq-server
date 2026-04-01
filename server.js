@@ -1357,7 +1357,6 @@ app.post('/api/voice-rooms', auth, async function(req, res) {
   try {
     var userId = req.user.id;
     var name = s(req.body.name) || 'غرفة جديدة';
-    var description = s(req.body.description) || '';
     var maxSeats = parseInt(req.body.max_seats) || 8;
     if (maxSeats < 2) maxSeats = 2;
     if (maxSeats > 20) maxSeats = 20;
@@ -1365,10 +1364,19 @@ app.post('/api/voice-rooms', auth, async function(req, res) {
     var password = isPrivate ? s(req.body.password) : null;
     var livekitRoom = 'vr_' + Date.now() + '_' + userId;
 
+    // ─── قاعدة: كل مستخدم غرفة واحدة فقط ───────────────────────
+    var existing = await db.query(
+      "SELECT id FROM voice_rooms WHERE owner_id=$1 AND status='active'",
+      [userId]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'لديك غرفة نشطة بالفعل، أغلقها أولاً' });
+    }
+
     var r = await db.query(
-      `INSERT INTO voice_rooms (name, description, owner_id, max_seats, is_private, password, livekit_room)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [name, description, userId, maxSeats, isPrivate, password, livekitRoom]
+      `INSERT INTO voice_rooms (name, owner_id, max_seats, is_private, password, livekit_room)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [name, userId, maxSeats, isPrivate, password, livekitRoom]
     );
     var room = r.rows[0];
 
@@ -1846,3 +1854,4 @@ initDB().then(function() {
   console.error('❌ DB Error:', e);
   process.exit(1);
 });
+
