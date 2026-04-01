@@ -732,13 +732,35 @@ app.get('/api/chats', auth, async function(req, res) {
 // ═══ MESSAGES ═══
 app.delete('/api/chats/:chatId/delete', auth, async function(req, res) {
   try {
-    var chatId  = req.params.chatId;
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    var chatId     = req.params.chatId;
+    var forBoth    = req.query.for_both === 'true';
+    var chatRow    = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
     if (!chatRow.rows.length) return res.status(404).json({ error: 'المحادثة غير موجودة' });
     if (!chatRow.rows[0].participants.includes(String(req.user.id))) return res.status(403).json({ error: 'غير مسموح' });
-    await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
-    await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
-    io.to(chatId).emit('chat_deleted', { chat_id: chatId });
+
+    if (forBoth) {
+      // حذف عند الطرفين: حذف المحادثة والرسائل نهائياً
+      await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
+      await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
+      // إشعار الطرف الآخر أيضاً
+      io.to(chatId).emit('chat_deleted', { chat_id: chatId, for_both: true });
+    } else {
+      // حذف عند الطالب فقط: أزله من المشاركين
+      var others = chatRow.rows[0].participants.filter(function(p) {
+        return p !== String(req.user.id);
+      });
+      if (others.length === 0) {
+        // لا يوجد طرف آخر، احذف نهائياً
+        await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
+        await db.query('DELETE FROM chats WHERE id=$1', [chatId]);
+      } else {
+        // أبقِ المحادثة للطرف الآخر وأزل المستخدم الحالي فقط
+        await db.query('UPDATE chats SET participants=$1 WHERE id=$2', [others, chatId]);
+      }
+      // أشعر المستخدم الحالي فقط
+      var mySocket = onlineUsers[String(req.user.id)];
+      if (mySocket) io.to(mySocket).emit('chat_deleted', { chat_id: chatId, for_both: false });
+    }
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
