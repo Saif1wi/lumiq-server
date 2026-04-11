@@ -1639,31 +1639,19 @@ io.on('connection', function(socket) {
     if (data && data.chat_id && socket.userId) {
       socket.to(data.chat_id).emit('typing', {
         chat_id:   data.chat_id,
-        user_id:   data.user_id,
+        user_id:   socket.userId,
         is_typing: !!data.is_typing
       });
     }
   });
 
-  socket.on('messages_seen', async function(data) {
+  socket.on('messages_seen', function(data) {
     if (!socket.userId || !data || !data.chat_id) return;
     var now = new Date().toISOString();
-
-    // ✅ صفّر unread_count في DB للقارئ
-    try {
-      var row = await db.query('SELECT unread_count FROM chats WHERE id=$1', [data.chat_id]);
-      if (row.rows.length) {
-        var uc = row.rows[0].unread_count || {};
-        uc[String(socket.userId)] = 0;
-        await db.query('UPDATE chats SET unread_count=$1 WHERE id=$2', [JSON.stringify(uc), data.chat_id]);
-      }
-    } catch(e) { console.error('messages_seen db error:', e.message); }
-
-    // ✅ أبلغ الطرف الآخر أن رسائله قُرئت
     if (data.partner_id && onlineUsers[String(data.partner_id)]) {
       io.to(onlineUsers[String(data.partner_id)]).emit('messages_seen', {
         chat_id:   data.chat_id,
-        reader_id: data.reader_id || socket.userId,
+        reader_id: data.reader_id,
         read_at:   now
       });
     }
