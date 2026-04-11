@@ -783,6 +783,10 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
 
     updateChatMeta(chatId, req.user.id, text.trim()).catch(function(e){console.error("meta err",e.message);});
     io.to(chatId).emit('new_message', msg);
+    // إرسال مباشر للمستخدم الآخر إذا لم يكن في الغرفة
+    if (otherPid && onlineUsers[String(otherPid)]) {
+      io.to(onlineUsers[String(otherPid)]).emit('new_message', msg);
+    }
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -816,6 +820,9 @@ app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload
 
     updateChatMeta(chatId, req.user.id, 'صورة 🖼️').catch(function(e){console.error('meta err',e.message);});
     io.to(chatId).emit('new_message', msg);
+    if (otherPid && onlineUsers[String(otherPid)]) {
+      io.to(onlineUsers[String(otherPid)]).emit('new_message', msg);
+    }
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -850,6 +857,9 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
 
     updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية').catch(function(e){console.error('meta err',e.message);});
     io.to(chatId).emit('new_message', msg);
+    if (otherPid && onlineUsers[String(otherPid)]) {
+      io.to(onlineUsers[String(otherPid)]).emit('new_message', msg);
+    }
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
