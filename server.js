@@ -165,6 +165,22 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
+  // ═══ COINS TABLE ═══
+  await db.query(`CREATE TABLE IF NOT EXISTS user_coins (
+    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    coins INT DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT NOW()
+  )`);
+
+  await db.query(`CREATE TABLE IF NOT EXISTS coin_transactions (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    amount INT NOT NULL,
+    reason TEXT DEFAULT '',
+    room_id INT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+
   // Indexes
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id)').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)').catch(function(){});
@@ -1262,7 +1278,7 @@ app.get('/api/rooms', auth, async function(req, res) {
       delete copy.game_state;
       return copy;
     });
-    res.json({ rooms: rooms });
+    res.json(rooms);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1284,7 +1300,7 @@ app.post('/api/rooms', auth, async function(req, res) {
     var row = await db.query(`
       INSERT INTO rooms (name, description, game_type, owner_id, max_players, is_private, password)
       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id
-    `, [name, description, game_type, req.userId, max_players, is_private, hashedPassword]);
+    `, [name, description, game_type, req.user.id, max_players, is_private, hashedPassword]);
 
     var roomId = row.rows[0].id;
 
@@ -1292,7 +1308,7 @@ app.post('/api/rooms', auth, async function(req, res) {
     await db.query(`
       INSERT INTO room_members (room_id, user_id, seat, color, is_ready)
       VALUES ($1,$2,0,'blue',false)
-    `, [roomId, req.userId]);
+    `, [roomId, req.user.id]);
 
     res.json({ room_id: roomId, message: 'تم إنشاء الروم' });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1320,6 +1336,16 @@ app.get('/api/rooms/:id', auth, async function(req, res) {
     `, [roomId]);
 
     room.members = members.rows;
+
+    // جلب آخر 100 رسالة في الغرفة
+    var msgs = await db.query(`
+      SELECT rm.*, u.name, u.username, u.photo_url
+      FROM room_messages rm JOIN users u ON rm.user_id = u.id
+      WHERE rm.room_id = $1 ORDER BY rm.created_at ASC LIMIT 100
+    `, [roomId]);
+    room.messages = msgs.rows;
+    room.my_id = req.user.id;
+
     res.json({ room: room });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1364,7 +1390,7 @@ app.post('/api/rooms/:id/join', auth, async function(req, res) {
       INSERT INTO room_members (room_id, user_id, seat, color, is_ready)
       VALUES ($1,$2,$3,$4,false)
       ON CONFLICT (room_id, user_id) DO NOTHING
-    `, [roomId, req.userId, seat, colors[seat] || 'blue']);
+    `, [roomId, req.user.id, seat, colors[seat] || 'blue']);
 
     res.json({ message: 'تم الانضمام', seat: seat });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1374,11 +1400,11 @@ app.post('/api/rooms/:id/join', auth, async function(req, res) {
 app.post('/api/rooms/:id/leave', auth, async function(req, res) {
   try {
     var roomId = parseInt(req.params.id);
-    await db.query('DELETE FROM room_members WHERE room_id=$1 AND user_id=$2', [roomId, req.userId]);
+    await db.query('DELETE FROM room_members WHERE room_id=$1 AND user_id=$2', [roomId, req.user.id]);
 
     // لو صاحب الروم غادر، نعطي الملكية لأول عضو أو نحذف الروم
     var room = await db.query('SELECT * FROM rooms WHERE id=$1', [roomId]);
-    if (room.rows.length && room.rows[0].owner_id === req.userId) {
+    if (room.rows.length && room.rows[0].owner_id === req.user.id) {
       var next = await db.query('SELECT user_id FROM room_members WHERE room_id=$1 ORDER BY joined_at LIMIT 1', [roomId]);
       if (next.rows.length) {
         await db.query('UPDATE rooms SET owner_id=$1 WHERE id=$2', [next.rows[0].user_id, roomId]);
@@ -1410,9 +1436,54 @@ app.delete('/api/rooms/:id', auth, async function(req, res) {
     var roomId = parseInt(req.params.id);
     var row = await db.query('SELECT owner_id FROM rooms WHERE id=$1', [roomId]);
     if (!row.rows.length) return res.status(404).json({ error: 'الروم غير موجودة' });
-    if (row.rows[0].owner_id !== req.userId) return res.status(403).json({ error: 'غير مصرح' });
+    if (row.rows[0].owner_id !== req.user.id) return res.status(403).json({ error: 'غير مصرح' });
     await db.query('DELETE FROM rooms WHERE id=$1', [roomId]);
     res.json({ message: 'تم حذف الروم' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════
+// ═══ COINS API ═════════════════════════════════════
+// ═══════════════════════════════════════════════════
+
+// Helper: جلب أو إنشاء رصيد عملات المستخدم
+async function getUserCoins(userId) {
+  var r = await db.query('SELECT coins FROM user_coins WHERE user_id=$1', [userId]);
+  if (r.rows.length) return parseInt(r.rows[0].coins);
+  await db.query('INSERT INTO user_coins (user_id, coins) VALUES ($1, 0) ON CONFLICT DO NOTHING', [userId]);
+  return 0;
+}
+
+// Helper: إضافة عملات لمستخدم مع تسجيل المعاملة
+async function addCoins(userId, amount, reason, roomId) {
+  await db.query(
+    'INSERT INTO user_coins (user_id, coins) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET coins = user_coins.coins + $2, updated_at = NOW()',
+    [userId, amount]
+  );
+  await db.query(
+    'INSERT INTO coin_transactions (user_id, amount, reason, room_id) VALUES ($1,$2,$3,$4)',
+    [userId, amount, reason || '', roomId || null]
+  );
+  var updated = await db.query('SELECT coins FROM user_coins WHERE user_id=$1', [userId]);
+  return parseInt(updated.rows[0].coins);
+}
+
+// جلب رصيد العملات للمستخدم الحالي
+app.get('/api/coins', auth, async function(req, res) {
+  try {
+    var coins = await getUserCoins(req.user.id);
+    res.json({ coins: coins });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// سجل معاملات العملات
+app.get('/api/coins/history', auth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT amount, reason, room_id, created_at FROM coin_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50',
+      [req.user.id]
+    );
+    res.json(r.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1722,6 +1793,62 @@ io.on('connection', function(socket) {
         photo_url: user.rows[0].photo_url
       });
     } catch(e) { console.error('room_message error:', e.message); }
+  });
+
+  // ═══ نتيجة لعبة خارجية (لودو، أونو، شطرنج خارجي) ═══
+  // Flutter يرسل هذا بعد انتهاء اللعبة الخارجية
+  // الخادم يتحقق من صحة البيانات ويضيف العملات للفائز
+  socket.on('external_game_result', async function(data) {
+    if (!socket.userId || !data || !data.room_id) return;
+    try {
+      var roomId       = parseInt(data.room_id);
+      var winnerUserId = parseInt(data.winner_user_id);
+      var coinsWon     = Math.min(Math.max(parseInt(data.coins_won) || 50, 1), 500); // بين 1-500
+
+      // تحقق أن الغرفة موجودة والمرسل عضو فيها
+      var roomCheck = await db.query(
+        'SELECT r.* FROM rooms r JOIN room_members rm ON rm.room_id=r.id WHERE r.id=$1 AND rm.user_id=$2',
+        [roomId, socket.userId]
+      );
+      if (!roomCheck.rows.length) return;
+
+      // تحقق أن الفائز عضو في نفس الغرفة
+      var winnerCheck = await db.query(
+        'SELECT id FROM room_members WHERE room_id=$1 AND user_id=$2',
+        [roomId, winnerUserId]
+      );
+      if (!winnerCheck.rows.length) return;
+
+      // أضف العملات للفائز
+      var newCoins = await addCoins(
+        winnerUserId,
+        coinsWon,
+        'فوز في ' + (roomCheck.rows[0].game_type || 'لعبة') + ' - غرفة #' + roomId,
+        roomId
+      );
+
+      // أعلم الفائز بعملاته الجديدة
+      if (onlineUsers[String(winnerUserId)]) {
+        io.to(onlineUsers[String(winnerUserId)]).emit('coins_updated', {
+          user_id: winnerUserId,
+          coins:   newCoins,
+          reason:  'فزت بـ ' + coinsWon + ' عملة! 🎉'
+        });
+      }
+
+      // أعلم جميع أعضاء الغرفة بنتيجة اللعبة
+      var roomKey = 'room_' + roomId;
+      io.to(roomKey).emit('room_game_over', {
+        room_id:    roomId,
+        winner_id:  winnerUserId,
+        coins_won:  coinsWon,
+        new_coins:  newCoins
+      });
+
+      // حدّث حالة الغرفة إلى منتهية
+      await db.query('UPDATE rooms SET status=$1 WHERE id=$2', ['finished', roomId]);
+
+    } catch(e) { console.error('external_game_result error:', e.message); }
   });
 
   socket.on('disconnect', async function() {
