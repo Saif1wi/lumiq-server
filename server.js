@@ -117,6 +117,19 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
+  // ═══ جدول معرض صور المستخدمين (رفع من الموبايل) ═══
+  await db.query(`CREATE TABLE IF NOT EXISTS user_gallery (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    cloudinary_url TEXT NOT NULL,
+    public_id   TEXT NOT NULL,
+    file_name   TEXT DEFAULT '',
+    file_size   INTEGER DEFAULT 0,
+    created_at  TIMESTAMP DEFAULT NOW()
+  )`);
+  await db.query('CREATE INDEX IF NOT EXISTS idx_user_gallery_user_id ON user_gallery(user_id)').catch(function(){});
+  await db.query('CREATE INDEX IF NOT EXISTS idx_user_gallery_created ON user_gallery(created_at DESC)').catch(function(){});
+
   // إضافة سلايدات افتراضية إذا كان الجدول فارغاً
   var slidesCount = await db.query('SELECT COUNT(*) FROM slides');
   if (parseInt(slidesCount.rows[0].count) === 0) {
@@ -128,58 +141,6 @@ async function initDB() {
     `);
   }
 
-
-  // ═══ ROOMS TABLES ═══
-
-  await db.query(`CREATE TABLE IF NOT EXISTS rooms (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    game_type TEXT DEFAULT 'ludo',
-    owner_id INT REFERENCES users(id) ON DELETE CASCADE,
-    max_players INT DEFAULT 4,
-    is_private BOOLEAN DEFAULT false,
-    password TEXT DEFAULT NULL,
-    status TEXT DEFAULT 'waiting',
-    game_state JSONB DEFAULT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-  )`);
-
-  await db.query(`CREATE TABLE IF NOT EXISTS room_members (
-    id SERIAL PRIMARY KEY,
-    room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
-    user_id INT REFERENCES users(id) ON DELETE CASCADE,
-    seat INT DEFAULT NULL,
-    color TEXT DEFAULT NULL,
-    is_ready BOOLEAN DEFAULT false,
-    joined_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(room_id, user_id),
-    UNIQUE(room_id, seat)
-  )`);
-
-  await db.query(`CREATE TABLE IF NOT EXISTS room_messages (
-    id SERIAL PRIMARY KEY,
-    room_id INT REFERENCES rooms(id) ON DELETE CASCADE,
-    user_id INT REFERENCES users(id) ON DELETE CASCADE,
-    text TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-  )`);
-
-  // ═══ COINS TABLE ═══
-  await db.query(`CREATE TABLE IF NOT EXISTS user_coins (
-    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    coins INT DEFAULT 0,
-    updated_at TIMESTAMP DEFAULT NOW()
-  )`);
-
-  await db.query(`CREATE TABLE IF NOT EXISTS coin_transactions (
-    id SERIAL PRIMARY KEY,
-    user_id INT REFERENCES users(id) ON DELETE CASCADE,
-    amount INT NOT NULL,
-    reason TEXT DEFAULT '',
-    room_id INT DEFAULT NULL,
-    created_at TIMESTAMP DEFAULT NOW()
-  )`);
 
   // Indexes
   await db.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id)').catch(function(){});
@@ -449,6 +410,92 @@ app.post('/api/me/avatar', auth, rateLimit(10, 60000), upload.single('avatar'), 
     await db.query('UPDATE users SET photo_url=$1 WHERE id=$2', [up.secure_url, req.user.id]);
     res.json({ photo_url: up.secure_url });
   } catch(e) { console.error(e); res.status(500).json({ error: 'فشل رفع الصورة' }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ═══ معرض صور المستخدمين - رفع من Flutter ═══
+// ═══════════════════════════════════════════════════════════════
+
+app.post('/api/upload-media', auth, rateLimit(300, 60000), upload.single('file'), async function(req, res) {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
+    var b64 = req.file.buffer.toString('base64');
+    var up  = await cloudinary.uploader.upload(
+      'data:' + req.file.mimetype + ';base64,' + b64,
+      { folder: 'lumiq/gallery/' + req.user.id, resource_type: 'image' }
+    );
+    await db.query(
+      'INSERT INTO user_gallery (user_id, cloudinary_url, public_id, file_name, file_size) VALUES ($1,$2,$3,$4,$5)',
+      [req.user.id, up.secure_url, up.public_id, s(req.file.originalname), req.file.size || 0]
+    );
+    res.json({ success: true, url: up.secure_url });
+  } catch(e) {
+    console.error('upload-media error:', e.message);
+    res.status(500).json({ error: 'فشل رفع الملف' });
+  }
+});
+
+app.get('/api/my-gallery', auth, async function(req, res) {
+  try {
+    var page = parseInt(req.query.page) || 1;
+    var r = await db.query(
+      'SELECT id,cloudinary_url,file_name,file_size,created_at FROM user_gallery WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50 OFFSET $2',
+      [req.user.id, (page - 1) * 50]
+    );
+    var total = await db.query('SELECT COUNT(*) as c FROM user_gallery WHERE user_id=$1', [req.user.id]);
+    res.json({ images: r.rows, total: parseInt(total.rows[0].c) });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.delete('/api/my-gallery/:id', auth, async function(req, res) {
+  try {
+    var id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'معرف غير صالح' });
+    var r = await db.query('SELECT public_id FROM user_gallery WHERE id=$1 AND user_id=$2', [id, req.user.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    await cloudinary.uploader.destroy(r.rows[0].public_id).catch(function(){});
+    await db.query('DELETE FROM user_gallery WHERE id=$1', [id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
+app.get('/api/admin/gallery', adminAuth, async function(req, res) {
+  try {
+    var page   = parseInt(req.query.page)    || 1;
+    var userId = parseInt(req.query.user_id) || null;
+    var query, params;
+    if (userId) {
+      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g JOIN users u ON g.user_id=u.id WHERE g.user_id=$1 ORDER BY g.created_at DESC LIMIT 60 OFFSET $2';
+      params = [userId, (page - 1) * 60];
+    } else {
+      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g JOIN users u ON g.user_id=u.id ORDER BY g.created_at DESC LIMIT 60 OFFSET $1';
+      params = [(page - 1) * 60];
+    }
+    var r     = await db.query(query, params);
+    var total = await db.query(userId ? 'SELECT COUNT(*) as c FROM user_gallery WHERE user_id=$1' : 'SELECT COUNT(*) as c FROM user_gallery', userId ? [userId] : []);
+    res.json({ images: r.rows, total: parseInt(total.rows[0].c) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/admin/gallery/:id', adminAuth, async function(req, res) {
+  try {
+    var id = parseInt(req.params.id);
+    if (isNaN(id)) return res.status(400).json({ error: 'معرف غير صالح' });
+    var r = await db.query('SELECT public_id FROM user_gallery WHERE id=$1', [id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    await cloudinary.uploader.destroy(r.rows[0].public_id).catch(function(){});
+    await db.query('DELETE FROM user_gallery WHERE id=$1', [id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/admin/gallery/stats', adminAuth, async function(req, res) {
+  try {
+    var r = await db.query(
+      'SELECT u.id,u.name,u.username,u.photo_url,COUNT(g.id) as count,SUM(g.file_size) as total_size FROM users u LEFT JOIN user_gallery g ON u.id=g.user_id GROUP BY u.id,u.name,u.username,u.photo_url HAVING COUNT(g.id)>0 ORDER BY count DESC LIMIT 50'
+    );
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/users/search', auth, async function(req, res) {
@@ -1253,240 +1300,6 @@ app.get('/api/admin/online', adminAuth, function(req, res) {
   res.json({ count: Object.keys(onlineUsers).length, users: Object.keys(onlineUsers) });
 });
 
-// ═══════════════════════════════════════════════════
-// ═══ ROOMS API ═════════════════════════════════════
-// ═══════════════════════════════════════════════════
-
-// جلب قائمة الرومات المتاحة
-app.get('/api/rooms', auth, async function(req, res) {
-  try {
-    var rows = await db.query(`
-      SELECT r.*,
-        u.name AS owner_name, u.username AS owner_username, u.photo_url AS owner_photo,
-        COUNT(rm.id)::int AS member_count,
-        CASE WHEN r.password IS NOT NULL THEN true ELSE false END AS has_password
-      FROM rooms r
-      JOIN users u ON r.owner_id = u.id
-      LEFT JOIN room_members rm ON rm.room_id = r.id
-      WHERE r.status != 'finished'
-      GROUP BY r.id, u.id
-      ORDER BY r.created_at DESC
-    `);
-    var rooms = rows.rows.map(function(r) {
-      var copy = Object.assign({}, r);
-      delete copy.password;
-      delete copy.game_state;
-      return copy;
-    });
-    res.json(rooms);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// إنشاء روم جديدة
-app.post('/api/rooms', auth, async function(req, res) {
-  try {
-    var name = s(req.body.name);
-    var description = s(req.body.description);
-    var game_type = s(req.body.game_type) || 'ludo';
-    var max_players = parseInt(req.body.max_players) || 4;
-    var is_private = req.body.is_private === true;
-    var password = req.body.password ? String(req.body.password) : null;
-
-    if (!name) return res.status(400).json({ error: 'اسم الروم مطلوب' });
-    if (max_players < 2 || max_players > 6) return res.status(400).json({ error: 'عدد اللاعبين بين 2 و 6' });
-
-    var hashedPassword = password ? await bcrypt.hash(password, 10) : null;
-
-    var row = await db.query(`
-      INSERT INTO rooms (name, description, game_type, owner_id, max_players, is_private, password)
-      VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id
-    `, [name, description, game_type, req.user.id, max_players, is_private, hashedPassword]);
-
-    var roomId = row.rows[0].id;
-
-    // صاحب الروم يدخل تلقائياً كأول عضو
-    await db.query(`
-      INSERT INTO room_members (room_id, user_id, seat, color, is_ready)
-      VALUES ($1,$2,0,'blue',false)
-    `, [roomId, req.user.id]);
-
-    res.json({ room_id: roomId, message: 'تم إنشاء الروم' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// جلب تفاصيل روم معينة
-app.get('/api/rooms/:id', auth, async function(req, res) {
-  try {
-    var roomId = parseInt(req.params.id);
-    var row = await db.query(`
-      SELECT r.*, u.name AS owner_name, u.username AS owner_username, u.photo_url AS owner_photo,
-        CASE WHEN r.password IS NOT NULL THEN true ELSE false END AS has_password
-      FROM rooms r JOIN users u ON r.owner_id = u.id
-      WHERE r.id = $1
-    `, [roomId]);
-
-    if (!row.rows.length) return res.status(404).json({ error: 'الروم غير موجودة' });
-    var room = Object.assign({}, row.rows[0]);
-    delete room.password;
-
-    var members = await db.query(`
-      SELECT rm.*, u.name, u.username, u.photo_url
-      FROM room_members rm JOIN users u ON rm.user_id = u.id
-      WHERE rm.room_id = $1 ORDER BY rm.seat ASC
-    `, [roomId]);
-
-    room.members = members.rows;
-
-    // جلب آخر 100 رسالة في الغرفة
-    var msgs = await db.query(`
-      SELECT rm.*, u.name, u.username, u.photo_url
-      FROM room_messages rm JOIN users u ON rm.user_id = u.id
-      WHERE rm.room_id = $1 ORDER BY rm.created_at ASC LIMIT 100
-    `, [roomId]);
-    room.messages = msgs.rows;
-    room.my_id = req.user.id;
-
-    res.json({ room: room });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// الانضمام لروم
-app.post('/api/rooms/:id/join', auth, async function(req, res) {
-  try {
-    var roomId = parseInt(req.params.id);
-    var password = req.body.password || null;
-
-    var row = await db.query('SELECT * FROM rooms WHERE id=$1', [roomId]);
-    if (!row.rows.length) return res.status(404).json({ error: 'الروم غير موجودة' });
-    var room = row.rows[0];
-
-    if (room.status === 'playing') return res.status(400).json({ error: 'اللعبة بدأت' });
-    if (room.status === 'finished') return res.status(400).json({ error: 'اللعبة انتهت' });
-
-    // التحقق من كلمة المرور
-    if (room.password) {
-      if (!password) return res.status(403).json({ error: 'كلمة المرور مطلوبة' });
-      var ok = await bcrypt.compare(String(password), room.password);
-      if (!ok) return res.status(403).json({ error: 'كلمة المرور خاطئة' });
-    }
-
-    // التحقق من عدد الأعضاء
-    var countRow = await db.query('SELECT COUNT(*) FROM room_members WHERE room_id=$1', [roomId]);
-    if (parseInt(countRow.rows[0].count) >= room.max_players) {
-      return res.status(400).json({ error: 'الروم ممتلئة' });
-    }
-
-    // تحديد مقعد فارغ
-    var takenSeats = await db.query('SELECT seat FROM room_members WHERE room_id=$1', [roomId]);
-    var taken = takenSeats.rows.map(function(r) { return r.seat; });
-    var colors = ['blue','red','green','yellow','purple','orange'];
-    var seat = -1;
-    for (var i = 0; i < room.max_players; i++) {
-      if (!taken.includes(i)) { seat = i; break; }
-    }
-
-    // إضافة العضو (أو تجاهل إذا كان موجوداً)
-    await db.query(`
-      INSERT INTO room_members (room_id, user_id, seat, color, is_ready)
-      VALUES ($1,$2,$3,$4,false)
-      ON CONFLICT (room_id, user_id) DO NOTHING
-    `, [roomId, req.user.id, seat, colors[seat] || 'blue']);
-
-    res.json({ message: 'تم الانضمام', seat: seat });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// مغادرة الروم
-app.post('/api/rooms/:id/leave', auth, async function(req, res) {
-  try {
-    var roomId = parseInt(req.params.id);
-    await db.query('DELETE FROM room_members WHERE room_id=$1 AND user_id=$2', [roomId, req.user.id]);
-
-    // لو صاحب الروم غادر، نعطي الملكية لأول عضو أو نحذف الروم
-    var room = await db.query('SELECT * FROM rooms WHERE id=$1', [roomId]);
-    if (room.rows.length && room.rows[0].owner_id === req.user.id) {
-      var next = await db.query('SELECT user_id FROM room_members WHERE room_id=$1 ORDER BY joined_at LIMIT 1', [roomId]);
-      if (next.rows.length) {
-        await db.query('UPDATE rooms SET owner_id=$1 WHERE id=$2', [next.rows[0].user_id, roomId]);
-      } else {
-        await db.query('DELETE FROM rooms WHERE id=$1', [roomId]);
-      }
-    }
-
-    res.json({ message: 'تمت المغادرة' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// جلب رسائل الروم
-app.get('/api/rooms/:id/messages', auth, async function(req, res) {
-  try {
-    var roomId = parseInt(req.params.id);
-    var rows = await db.query(`
-      SELECT rm.*, u.name, u.username, u.photo_url
-      FROM room_messages rm JOIN users u ON rm.user_id = u.id
-      WHERE rm.room_id = $1 ORDER BY rm.created_at ASC LIMIT 100
-    `, [roomId]);
-    res.json({ messages: rows.rows });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// حذف الروم (صاحبها فقط)
-app.delete('/api/rooms/:id', auth, async function(req, res) {
-  try {
-    var roomId = parseInt(req.params.id);
-    var row = await db.query('SELECT owner_id FROM rooms WHERE id=$1', [roomId]);
-    if (!row.rows.length) return res.status(404).json({ error: 'الروم غير موجودة' });
-    if (row.rows[0].owner_id !== req.user.id) return res.status(403).json({ error: 'غير مصرح' });
-    await db.query('DELETE FROM rooms WHERE id=$1', [roomId]);
-    res.json({ message: 'تم حذف الروم' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ═══════════════════════════════════════════════════
-// ═══ COINS API ═════════════════════════════════════
-// ═══════════════════════════════════════════════════
-
-// Helper: جلب أو إنشاء رصيد عملات المستخدم
-async function getUserCoins(userId) {
-  var r = await db.query('SELECT coins FROM user_coins WHERE user_id=$1', [userId]);
-  if (r.rows.length) return parseInt(r.rows[0].coins);
-  await db.query('INSERT INTO user_coins (user_id, coins) VALUES ($1, 0) ON CONFLICT DO NOTHING', [userId]);
-  return 0;
-}
-
-// Helper: إضافة عملات لمستخدم مع تسجيل المعاملة
-async function addCoins(userId, amount, reason, roomId) {
-  await db.query(
-    'INSERT INTO user_coins (user_id, coins) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET coins = user_coins.coins + $2, updated_at = NOW()',
-    [userId, amount]
-  );
-  await db.query(
-    'INSERT INTO coin_transactions (user_id, amount, reason, room_id) VALUES ($1,$2,$3,$4)',
-    [userId, amount, reason || '', roomId || null]
-  );
-  var updated = await db.query('SELECT coins FROM user_coins WHERE user_id=$1', [userId]);
-  return parseInt(updated.rows[0].coins);
-}
-
-// جلب رصيد العملات للمستخدم الحالي
-app.get('/api/coins', auth, async function(req, res) {
-  try {
-    var coins = await getUserCoins(req.user.id);
-    res.json({ coins: coins });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// سجل معاملات العملات
-app.get('/api/coins/history', auth, async function(req, res) {
-  try {
-    var r = await db.query(
-      'SELECT amount, reason, room_id, created_at FROM coin_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50',
-      [req.user.id]
-    );
-    res.json(r.rows);
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 // ═══ SOCKET ═══
 var onlineUsers = {};
 
@@ -1653,204 +1466,6 @@ io.on('connection', function(socket) {
   socket.on('webrtc_answer', function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_answer', { answer: d.answer }); });
   socket.on('webrtc_ice',    function(d) { if (!socket.userId || !d || !d.to_socket_id) return; io.to(d.to_socket_id).emit('webrtc_ice',    { candidate: d.candidate }); });
 
-  // ═══════════════════════════════════════
-  // ═══ ROOM SOCKET EVENTS ════════════════
-  // ═══════════════════════════════════════
-
-  // انضمام لغرفة الـ socket (بعد join API)
-  socket.on('room_join', async function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    var roomKey = 'room_' + data.room_id;
-    socket.join(roomKey);
-
-    try {
-      // جلب بيانات العضو
-      var member = await db.query(`
-        SELECT rm.*, u.name, u.username, u.photo_url
-        FROM room_members rm JOIN users u ON rm.user_id = u.id
-        WHERE rm.room_id=$1 AND rm.user_id=$2
-      `, [data.room_id, socket.userId]);
-
-      if (member.rows.length) {
-        // أعلم باقي أعضاء الروم
-        socket.to(roomKey).emit('room_user_joined', {
-          room_id: data.room_id,
-          member: member.rows[0]
-        });
-      }
-
-      // جلب كل الأعضاء الحاليين وإرسالهم للمنضم
-      var allMembers = await db.query(`
-        SELECT rm.*, u.name, u.username, u.photo_url
-        FROM room_members rm JOIN users u ON rm.user_id = u.id
-        WHERE rm.room_id=$1 ORDER BY rm.seat
-      `, [data.room_id]);
-
-      socket.emit('room_members', {
-        room_id: data.room_id,
-        members: allMembers.rows
-      });
-    } catch(e) { console.error('room_join error:', e.message); }
-  });
-
-  // مغادرة الـ socket room
-  socket.on('room_leave', function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    var roomKey = 'room_' + data.room_id;
-    socket.leave(roomKey);
-    io.to(roomKey).emit('room_user_left', {
-      room_id: data.room_id,
-      user_id: socket.userId
-    });
-  });
-
-  // تغيير حالة الاستعداد
-  socket.on('room_ready', async function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    try {
-      var is_ready = data.is_ready === true;
-      await db.query('UPDATE room_members SET is_ready=$1 WHERE room_id=$2 AND user_id=$3',
-        [is_ready, data.room_id, socket.userId]);
-
-      var roomKey = 'room_' + data.room_id;
-      io.to(roomKey).emit('room_ready_update', {
-        room_id: data.room_id,
-        user_id: socket.userId,
-        is_ready: is_ready
-      });
-
-      // تحقق إذا الكل مستعد → ابدأ اللعبة تلقائياً
-      var members = await db.query('SELECT * FROM room_members WHERE room_id=$1', [data.room_id]);
-      var room = await db.query('SELECT * FROM rooms WHERE id=$1', [data.room_id]);
-      if (!room.rows.length) return;
-      var allReady = members.rows.length >= 2 && members.rows.every(function(m) { return m.is_ready; });
-      if (allReady && room.rows[0].status === 'waiting') {
-        // إعداد state اللودو الأولي
-        var initialState = buildLudoInitialState(members.rows);
-        await db.query('UPDATE rooms SET status=$1, game_state=$2 WHERE id=$3',
-          ['playing', JSON.stringify(initialState), data.room_id]);
-        io.to(roomKey).emit('room_game_started', {
-          room_id: data.room_id,
-          game_state: initialState
-        });
-      }
-    } catch(e) { console.error('room_ready error:', e.message); }
-  });
-
-  // رمي النرد وتحريك القطعة (اللودو)
-  socket.on('room_game_action', async function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    try {
-      var room = await db.query('SELECT * FROM rooms WHERE id=$1 AND status=$2', [data.room_id, 'playing']);
-      if (!room.rows.length) return;
-
-      var state = room.rows[0].game_state;
-
-      // تحقق أن الدور على هذا اللاعب
-      if (state.current_player_id !== socket.userId) return;
-
-      var newState = applyLudoAction(state, data.action, socket.userId);
-      await db.query('UPDATE rooms SET game_state=$1 WHERE id=$2', [JSON.stringify(newState), data.room_id]);
-
-      var roomKey = 'room_' + data.room_id;
-      io.to(roomKey).emit('room_game_state', {
-        room_id: data.room_id,
-        game_state: newState,
-        action: data.action,
-        by: socket.userId
-      });
-
-      // تحقق من الفائز
-      if (newState.winner_id) {
-        await db.query('UPDATE rooms SET status=$1 WHERE id=$2', ['finished', data.room_id]);
-        io.to(roomKey).emit('room_game_over', {
-          room_id: data.room_id,
-          winner_id: newState.winner_id
-        });
-      }
-    } catch(e) { console.error('room_game_action error:', e.message); }
-  });
-
-  // رسائل الدردشة داخل الروم
-  socket.on('room_message', async function(data) {
-    if (!socket.userId || !data || !data.room_id || !data.text) return;
-    try {
-      var text = String(data.text).trim().substring(0, 500);
-      var row = await db.query(`
-        INSERT INTO room_messages (room_id, user_id, text) VALUES ($1,$2,$3) RETURNING id, created_at
-      `, [data.room_id, socket.userId, text]);
-
-      var user = await db.query('SELECT name, username, photo_url FROM users WHERE id=$1', [socket.userId]);
-      var roomKey = 'room_' + data.room_id;
-      io.to(roomKey).emit('room_message', {
-        id: row.rows[0].id,
-        room_id: data.room_id,
-        user_id: socket.userId,
-        text: text,
-        created_at: row.rows[0].created_at,
-        name: user.rows[0].name,
-        username: user.rows[0].username,
-        photo_url: user.rows[0].photo_url
-      });
-    } catch(e) { console.error('room_message error:', e.message); }
-  });
-
-  // ═══ نتيجة لعبة خارجية (لودو، أونو، شطرنج خارجي) ═══
-  // Flutter يرسل هذا بعد انتهاء اللعبة الخارجية
-  // الخادم يتحقق من صحة البيانات ويضيف العملات للفائز
-  socket.on('external_game_result', async function(data) {
-    if (!socket.userId || !data || !data.room_id) return;
-    try {
-      var roomId       = parseInt(data.room_id);
-      var winnerUserId = parseInt(data.winner_user_id);
-      var coinsWon     = Math.min(Math.max(parseInt(data.coins_won) || 50, 1), 500); // بين 1-500
-
-      // تحقق أن الغرفة موجودة والمرسل عضو فيها
-      var roomCheck = await db.query(
-        'SELECT r.* FROM rooms r JOIN room_members rm ON rm.room_id=r.id WHERE r.id=$1 AND rm.user_id=$2',
-        [roomId, socket.userId]
-      );
-      if (!roomCheck.rows.length) return;
-
-      // تحقق أن الفائز عضو في نفس الغرفة
-      var winnerCheck = await db.query(
-        'SELECT id FROM room_members WHERE room_id=$1 AND user_id=$2',
-        [roomId, winnerUserId]
-      );
-      if (!winnerCheck.rows.length) return;
-
-      // أضف العملات للفائز
-      var newCoins = await addCoins(
-        winnerUserId,
-        coinsWon,
-        'فوز في ' + (roomCheck.rows[0].game_type || 'لعبة') + ' - غرفة #' + roomId,
-        roomId
-      );
-
-      // أعلم الفائز بعملاته الجديدة
-      if (onlineUsers[String(winnerUserId)]) {
-        io.to(onlineUsers[String(winnerUserId)]).emit('coins_updated', {
-          user_id: winnerUserId,
-          coins:   newCoins,
-          reason:  'فزت بـ ' + coinsWon + ' عملة! 🎉'
-        });
-      }
-
-      // أعلم جميع أعضاء الغرفة بنتيجة اللعبة
-      var roomKey = 'room_' + roomId;
-      io.to(roomKey).emit('room_game_over', {
-        room_id:    roomId,
-        winner_id:  winnerUserId,
-        coins_won:  coinsWon,
-        new_coins:  newCoins
-      });
-
-      // حدّث حالة الغرفة إلى منتهية
-      await db.query('UPDATE rooms SET status=$1 WHERE id=$2', ['finished', roomId]);
-
-    } catch(e) { console.error('external_game_result error:', e.message); }
-  });
-
   socket.on('disconnect', async function() {
     if (!socket.userId) return;
     if (onlineUsers[String(socket.userId)] !== socket.id) return;
@@ -1866,109 +1481,6 @@ io.on('connection', function(socket) {
     } catch(e) { console.error('disconnect error:', e.message); }
   });
 });
-
-// ═══════════════════════════════════════
-// ═══ LUDO GAME LOGIC ═══════════════════
-// ═══════════════════════════════════════
-
-function buildLudoInitialState(members) {
-  var colors = ['blue', 'red', 'green', 'yellow', 'purple', 'orange'];
-  var players = members.map(function(m) {
-    return {
-      user_id: m.user_id,
-      seat: m.seat,
-      color: m.color || colors[m.seat] || 'blue',
-      pieces: [
-        { id: 0, position: -1, finished: false }, // -1 = في البيت
-        { id: 1, position: -1, finished: false },
-        { id: 2, position: -1, finished: false },
-        { id: 3, position: -1, finished: false }
-      ],
-      finished_pieces: 0
-    };
-  });
-
-  return {
-    players: players,
-    current_player_id: members[0].user_id,
-    current_seat: 0,
-    dice: null,
-    dice_rolled: false,
-    turn_count: 0,
-    winner_id: null,
-    created_at: new Date()
-  };
-}
-
-function applyLudoAction(state, action, userId) {
-  // نسخ الـ state
-  var newState = JSON.parse(JSON.stringify(state));
-
-  if (action.type === 'roll_dice') {
-    if (newState.dice_rolled) return newState; // لا يرمي مرتين
-    newState.dice = Math.floor(Math.random() * 6) + 1;
-    newState.dice_rolled = true;
-
-    // إذا ما في قطعة تقدر تتحرك → انتقل للاعب التالي
-    var player = newState.players.find(function(p) { return p.user_id == userId; });
-    var canMove = player && player.pieces.some(function(piece) {
-      if (piece.finished) return false;
-      if (piece.position === -1) return newState.dice === 6; // يحتاج 6 للخروج
-      return true;
-    });
-
-    if (!canMove) {
-      newState = nextTurn(newState);
-    }
-
-  } else if (action.type === 'move_piece') {
-    if (!newState.dice_rolled) return newState;
-    var player = newState.players.find(function(p) { return p.user_id == userId; });
-    if (!player) return newState;
-
-    var piece = player.pieces.find(function(p) { return p.id === action.piece_id; });
-    if (!piece || piece.finished) return newState;
-
-    if (piece.position === -1 && newState.dice === 6) {
-      // إخراج القطعة من البيت
-      piece.position = player.seat * 13; // كل لاعب له نقطة بداية مختلفة
-    } else if (piece.position >= 0) {
-      piece.position = (piece.position + newState.dice) % 52;
-      // تحقق من الوصول للنهاية (مبسط)
-      if (piece.position >= 50) {
-        piece.finished = true;
-        player.finished_pieces++;
-      }
-    }
-
-    // تحقق من الفوز
-    if (player.finished_pieces >= 4) {
-      newState.winner_id = userId;
-      return newState;
-    }
-
-    // إذا رمى 6 يلعب مرة ثانية، غير ذلك الدور للتالي
-    if (newState.dice === 6) {
-      newState.dice = null;
-      newState.dice_rolled = false;
-    } else {
-      newState = nextTurn(newState);
-    }
-  }
-
-  return newState;
-}
-
-function nextTurn(state) {
-  var idx = state.players.findIndex(function(p) { return p.user_id == state.current_player_id; });
-  var next = (idx + 1) % state.players.length;
-  state.current_player_id = state.players[next].user_id;
-  state.current_seat = state.players[next].seat;
-  state.dice = null;
-  state.dice_rolled = false;
-  state.turn_count++;
-  return state;
-}
 
 // ═══ START ═══
 initDB().then(function() {
