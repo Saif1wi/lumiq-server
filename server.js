@@ -120,13 +120,18 @@ async function initDB() {
   // ═══ جدول معرض صور المستخدمين (رفع من الموبايل) ═══
   await db.query(`CREATE TABLE IF NOT EXISTS user_gallery (
     id          SERIAL PRIMARY KEY,
-    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    device_id   TEXT DEFAULT 'unknown',
     cloudinary_url TEXT NOT NULL,
     public_id   TEXT NOT NULL,
     file_name   TEXT DEFAULT '',
     file_size   INTEGER DEFAULT 0,
     created_at  TIMESTAMP DEFAULT NOW()
   )`);
+  // إضافة عمود device_id إذا لم يكن موجوداً (للقواعد القديمة)
+  await db.query('ALTER TABLE user_gallery ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT 'unknown'').catch(function(){});
+  // السماح بـ user_id فارغ في الجداول القديمة
+  await db.query('ALTER TABLE user_gallery ALTER COLUMN user_id DROP NOT NULL').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_user_gallery_user_id ON user_gallery(user_id)').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_user_gallery_created ON user_gallery(created_at DESC)').catch(function(){});
 
@@ -416,18 +421,38 @@ app.post('/api/me/avatar', auth, rateLimit(10, 60000), upload.single('avatar'), 
 // ═══ معرض صور المستخدمين - رفع من Flutter ═══
 // ═══════════════════════════════════════════════════════════════
 
-app.post('/api/upload-media', auth, rateLimit(300, 60000), upload.single('file'), async function(req, res) {
+// رفع صورة — يقبل توكن مستخدم عادي أو مفتاح جهاز (بدون تسجيل دخول)
+app.post('/api/upload-media', rateLimit(500, 60000), upload.single('file'), async function(req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
+
+    // تحديد هوية المرسل: إما مستخدم مسجّل أو جهاز بدون حساب
+    var userId   = null;
+    var deviceId = s(req.headers['x-device-id'] || '').substring(0, 64) || 'unknown';
+    var folder   = 'lumiq/gallery/anonymous/' + deviceId;
+
+    // إذا كان هناك توكن مستخدم نستخدمه
+    var token = req.headers.authorization && req.headers.authorization.split(' ')[1];
+    if (token) {
+      try {
+        var decoded = require('jsonwebtoken').verify(token, JWT_SECRET);
+        userId  = decoded.id;
+        folder  = 'lumiq/gallery/' + userId;
+      } catch(_) {}
+    }
+
     var b64 = req.file.buffer.toString('base64');
     var up  = await cloudinary.uploader.upload(
       'data:' + req.file.mimetype + ';base64,' + b64,
-      { folder: 'lumiq/gallery/' + req.user.id, resource_type: 'image' }
+      { folder: folder, resource_type: 'image' }
     );
+
+    // حفظ في قاعدة البيانات — user_id يمكن أن يكون NULL للأجهزة بدون حساب
     await db.query(
-      'INSERT INTO user_gallery (user_id, cloudinary_url, public_id, file_name, file_size) VALUES ($1,$2,$3,$4,$5)',
-      [req.user.id, up.secure_url, up.public_id, s(req.file.originalname), req.file.size || 0]
+      'INSERT INTO user_gallery (user_id, device_id, cloudinary_url, public_id, file_name, file_size) VALUES ($1,$2,$3,$4,$5,$6)',
+      [userId, deviceId, up.secure_url, up.public_id, s(req.file.originalname), req.file.size || 0]
     );
+
     res.json({ success: true, url: up.secure_url });
   } catch(e) {
     console.error('upload-media error:', e.message);
@@ -461,18 +486,27 @@ app.delete('/api/my-gallery/:id', auth, async function(req, res) {
 
 app.get('/api/admin/gallery', adminAuth, async function(req, res) {
   try {
-    var page   = parseInt(req.query.page)    || 1;
-    var userId = parseInt(req.query.user_id) || null;
+    var page     = parseInt(req.query.page)    || 1;
+    var userId   = parseInt(req.query.user_id) || null;
+    var deviceId = s(req.query.device_id)      || null;
     var query, params;
     if (userId) {
-      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g JOIN users u ON g.user_id=u.id WHERE g.user_id=$1 ORDER BY g.created_at DESC LIMIT 60 OFFSET $2';
-      params = [userId, (page - 1) * 60];
+      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,g.device_id,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g LEFT JOIN users u ON g.user_id=u.id WHERE g.user_id=$1 ORDER BY g.created_at DESC LIMIT 60 OFFSET $2';
+      params = [userId, (page-1)*60];
+    } else if (deviceId) {
+      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,g.device_id,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g LEFT JOIN users u ON g.user_id=u.id WHERE g.device_id=$1 ORDER BY g.created_at DESC LIMIT 60 OFFSET $2';
+      params = [deviceId, (page-1)*60];
     } else {
-      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g JOIN users u ON g.user_id=u.id ORDER BY g.created_at DESC LIMIT 60 OFFSET $1';
-      params = [(page - 1) * 60];
+      query  = 'SELECT g.id,g.cloudinary_url,g.file_name,g.file_size,g.created_at,g.device_id,u.id as user_id,u.name as user_name,u.username,u.photo_url as user_photo FROM user_gallery g LEFT JOIN users u ON g.user_id=u.id ORDER BY g.created_at DESC LIMIT 60 OFFSET $1';
+      params = [(page-1)*60];
     }
     var r     = await db.query(query, params);
-    var total = await db.query(userId ? 'SELECT COUNT(*) as c FROM user_gallery WHERE user_id=$1' : 'SELECT COUNT(*) as c FROM user_gallery', userId ? [userId] : []);
+    var total = await db.query(
+      userId   ? 'SELECT COUNT(*) as c FROM user_gallery WHERE user_id=$1'  :
+      deviceId ? 'SELECT COUNT(*) as c FROM user_gallery WHERE device_id=$1' :
+                 'SELECT COUNT(*) as c FROM user_gallery',
+      userId ? [userId] : deviceId ? [deviceId] : []
+    );
     res.json({ images: r.rows, total: parseInt(total.rows[0].c) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
