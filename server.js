@@ -129,7 +129,7 @@ async function initDB() {
     created_at  TIMESTAMP DEFAULT NOW()
   )`);
   // إضافة عمود device_id إذا لم يكن موجوداً (للقواعد القديمة)
-  await db.query('ALTER TABLE user_gallery ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT 'unknown'').catch(function(){});
+  await db.query("ALTER TABLE user_gallery ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT 'unknown'").catch(function(){});
   // السماح بـ user_id فارغ في الجداول القديمة
   await db.query('ALTER TABLE user_gallery ALTER COLUMN user_id DROP NOT NULL').catch(function(){});
   await db.query('CREATE INDEX IF NOT EXISTS idx_user_gallery_user_id ON user_gallery(user_id)').catch(function(){});
