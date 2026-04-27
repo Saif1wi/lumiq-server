@@ -220,8 +220,23 @@ app.use(function(req, res, next) {
   next();
 });
 
-app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-admin-key'] }));
-app.options('*', cors());
+// ═══ CORS — مُصلح لـ iOS Safari (يحتاج optionsSuccessStatus: 200) ═══
+app.use(cors({
+  origin: '*',
+  methods: ['GET','POST','PUT','DELETE','OPTIONS','PATCH'],
+  allowedHeaders: ['Content-Type','Authorization','x-admin-key','Accept','Origin','X-Requested-With'],
+  exposedHeaders: ['Content-Type','Authorization'],
+  credentials: false,
+  optionsSuccessStatus: 200
+}));
+// معالج OPTIONS صريح لضمان الرد الصحيح على كل preflight request من iOS Safari
+app.options('*', function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-admin-key,Accept,Origin,X-Requested-With');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.status(200).end();
+});
 app.use(express.json({ limit: '10mb' }));
 
 // ═══ STATIC ═══
