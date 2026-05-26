@@ -7,7 +7,6 @@ const jwt        = require('jsonwebtoken');
 const cors       = require('cors');
 const multer     = require('multer');
 const cloudinary = require('cloudinary').v2;
-const admin      = require('firebase-admin');
 
 // ═══ CONFIG ═══
 const JWT_SECRET    = process.env.JWT_SECRET    || (process.env.NODE_ENV === 'production' ? null : 'lumiq_secret_dev_only');
@@ -22,48 +21,6 @@ cloudinary.config({
   api_key:    process.env.CLOUDINARY_KEY    || '536977242836915',
   api_secret: process.env.CLOUDINARY_SECRET || 'kqIUC7aXQJF_s8r6kA5e_z367yA'
 });
-
-
-// ═══ FIREBASE ADMIN ═══
-try {
-  var serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
-    ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-    : require('./lumiqk-56714-ca3b2f4e97a0.json');
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-  console.log('Firebase Admin initialized');
-} catch(e) {
-  console.warn('Firebase Admin not initialized:', e.message);
-}
-
-async function sendPush(tokens, title, body, data) {
-  if (!tokens || !tokens.length) return;
-  try {
-    var validTokens = tokens.filter(Boolean);
-    if (!validTokens.length) return;
-    var msg = {
-      notification: { title: title, body: body },
-      data: data || {},
-      android: { notification: { sound: 'default', priority: 'high', channelId: 'lumiq_messages' } },
-      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
-      tokens: validTokens
-    };
-    var result = await admin.messaging().sendEachForMulticast(msg);
-    result.responses.forEach(function(r, i) {
-      if (!r.success && r.error &&
-          (r.error.code === 'messaging/invalid-registration-token' ||
-           r.error.code === 'messaging/registration-token-not-registered')) {
-        db.query('DELETE FROM fcm_tokens WHERE token=$1', [validTokens[i]]).catch(function(){});
-      }
-    });
-  } catch(e) { console.error('FCM error:', e.message); }
-}
-
-async function getUserFcmTokens(userId) {
-  try {
-    var r = await db.query('SELECT token FROM fcm_tokens WHERE user_id=$1', [userId]);
-    return r.rows.map(function(row) { return row.token; });
-  } catch(e) { return []; }
-}
 
 // ═══ DB ═══
 const db = new Pool({
@@ -148,15 +105,6 @@ async function initDB() {
     PRIMARY KEY(user_id, notification_id)
   )`);
 
-  await db.query(`CREATE TABLE IF NOT EXISTS fcm_tokens (
-    id SERIAL PRIMARY KEY,
-    user_id INT REFERENCES users(id) ON DELETE CASCADE,
-    token TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(user_id, token)
-  )`);
-
-
   await db.query(`CREATE TABLE IF NOT EXISTS slides (
     id SERIAL PRIMARY KEY,
     title TEXT NOT NULL DEFAULT '',
@@ -201,8 +149,6 @@ async function initDB() {
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded BOOLEAN DEFAULT false",
     "ALTER TABLE chats ADD COLUMN IF NOT EXISTS read_at JSONB DEFAULT '{}'"
   ];
-  // ensure fcm_tokens index
-  await db.query('CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user ON fcm_tokens(user_id)').catch(function(){});
   for (var i = 0; i < alters.length; i++) {
     await db.query(alters[i]).catch(function(){});
   }
@@ -412,31 +358,6 @@ app.get('/api/me', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// ═══ FCM TOKEN ═══
-app.post('/api/fcm-token', auth, async function(req, res) {
-  try {
-    var token = req.body.token ? String(req.body.token).trim() : '';
-    if (!token) return res.status(400).json({ error: 'token مطلوب' });
-    await db.query(
-      'INSERT INTO fcm_tokens (user_id, token) VALUES ($1, $2) ON CONFLICT (user_id, token) DO NOTHING',
-      [req.user.id, token]
-    );
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.delete('/api/fcm-token', auth, async function(req, res) {
-  try {
-    var token = req.body.token ? String(req.body.token).trim() : '';
-    if (token) {
-      await db.query('DELETE FROM fcm_tokens WHERE user_id=$1 AND token=$2', [req.user.id, token]);
-    } else {
-      await db.query('DELETE FROM fcm_tokens WHERE user_id=$1', [req.user.id]);
-    }
-    res.json({ ok: true });
-  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
-});
-
 app.put('/api/me', auth, async function(req, res) {
   try {
     var name            = s(req.body.name)    || null;
@@ -574,16 +495,6 @@ app.post('/api/friends/request', auth, rateLimit(20, 60000), async function(req,
     var sender = await db.query('SELECT id,name,username,photo_url,is_verified FROM users WHERE id=$1', [req.user.id]);
     if (onlineUsers[String(targetId)]) {
       io.to(onlineUsers[String(targetId)]).emit('friend_request', { from: sender.rows[0] });
-      // Push notification لطلب الصداقة
-      (async function() {
-        try {
-          var frTokens = await getUserFcmTokens(targetId);
-          if (frTokens.length) {
-            await sendPush(frTokens, sender.rows[0].name || 'شخص ما', 'أرسل لك طلب صداقة 👋',
-              { type: 'friend_request', from_id: String(req.user.id) });
-          }
-        } catch(fe) {}
-      })();
     }
     res.json({ ok: true });
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -731,27 +642,6 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
 
     updateChatMeta(chatId, req.user.id, text.trim()).catch(function(e){console.error("meta err",e.message);});
     io.to(chatId).emit('new_message', msg);
-    // Push notification لمن هو غير متصل أو خارج المحادثة
-    (async function() {
-      try {
-        var chat = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-        if (!chat.rows.length) return;
-        var sender = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
-        var senderName = sender.rows.length ? sender.rows[0].name : 'شخص ما';
-        var participants = chat.rows[0].participants;
-        for (var pi = 0; pi < participants.length; pi++) {
-          var pid = participants[pi];
-          if (String(pid) === String(req.user.id)) continue;
-          // أرسل push فقط إذا كان المستخدم غير موجود في الغرفة
-          var socketId = onlineUsers[String(pid)];
-          var tokens = await getUserFcmTokens(pid);
-          if (tokens.length) {
-            await sendPush(tokens, senderName, text.trim().substring(0, 100),
-              { type: 'new_message', chat_id: chatId, sender_id: String(req.user.id) });
-          }
-        }
-      } catch(pushErr) { console.error('push err:', pushErr.message); }
-    })();
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -785,22 +675,6 @@ app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload
 
     updateChatMeta(chatId, req.user.id, 'صورة 🖼️').catch(function(e){console.error('meta err',e.message);});
     io.to(chatId).emit('new_message', msg);
-    (async function() {
-      try {
-        var chat2 = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-        if (!chat2.rows.length) return;
-        var sender2 = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
-        var senderName2 = sender2.rows.length ? sender2.rows[0].name : 'شخص ما';
-        var participants2 = chat2.rows[0].participants;
-        for (var pi2 = 0; pi2 < participants2.length; pi2++) {
-          var pid2 = participants2[pi2];
-          if (String(pid2) === String(req.user.id)) continue;
-          var tokens2 = await getUserFcmTokens(pid2);
-          if (tokens2.length) await sendPush(tokens2, senderName2, 'أرسل لك صورة 🖼️',
-            { type: 'new_message', chat_id: chatId, sender_id: String(req.user.id) });
-        }
-      } catch(e2) {}
-    })();
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
@@ -835,22 +709,6 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
 
     updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية').catch(function(e){console.error('meta err',e.message);});
     io.to(chatId).emit('new_message', msg);
-    (async function() {
-      try {
-        var chatV = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-        if (!chatV.rows.length) return;
-        var senderV = await db.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
-        var senderNameV = senderV.rows.length ? senderV.rows[0].name : 'شخص ما';
-        var participantsV = chatV.rows[0].participants;
-        for (var piv = 0; piv < participantsV.length; piv++) {
-          var pidv = participantsV[piv];
-          if (String(pidv) === String(req.user.id)) continue;
-          var tokensV = await getUserFcmTokens(pidv);
-          if (tokensV.length) await sendPush(tokensV, senderNameV, '🎤 أرسل لك رسالة صوتية',
-            { type: 'new_message', chat_id: chatId, sender_id: String(req.user.id) });
-        }
-      } catch(ev) {}
-    })();
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
