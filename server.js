@@ -662,10 +662,25 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
-    // تحقق من أن المستخدم عضو في المحادثة
-    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+
+    // تحقق من العضوية + جلب الرسائل بشكل متوازٍ
+    var [access, r] = await Promise.all([
+      db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]),
+      db.query(
+        `SELECT
+           id, chat_id, sender_id, type,
+           text, audio_url, image_url, duration,
+           seen, reactions, reply_to,
+           forwarded, expires_at, created_at
+         FROM messages
+         WHERE chat_id=$1
+         ORDER BY created_at ASC
+         LIMIT 200`,
+        [chatId]
+      )
+    ]);
+
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-    var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [chatId]);
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -1326,8 +1341,17 @@ io.on('connection', function(socket) {
     if (!socket.userId || data.level === undefined) return;
     var level = Math.round(Math.max(0, Math.min(100, Number(data.level))));
     try {
-      await db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]);
-      socket.broadcast.emit('battery_changed', { user_id: socket.userId, level: level });
+      // ① حدّث DB والغرف بشكل متوازٍ — لا انتظار
+      var [, chats] = await Promise.all([
+        db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]),
+        db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)])
+      ]);
+
+      // ② أرسل فقط لأصحاب المحادثات المشتركة — لا للجميع
+      var payload = { user_id: socket.userId, level: level };
+      chats.rows.forEach(function(c) {
+        socket.to(c.id).emit('battery_changed', payload);
+      });
     } catch(e) {}
   });
 
