@@ -663,25 +663,46 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
 
+    // before = id آخر رسالة معروفة — للتحميل التدريجي عند السحب للأعلى
+    var before  = req.query.before ? parseInt(req.query.before) : null;
+    var PAGE    = 30;
+
     // تحقق من العضوية + جلب الرسائل بشكل متوازٍ
     var [access, r] = await Promise.all([
       db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]),
-      db.query(
-        `SELECT
-           id, chat_id, sender_id, type,
-           text, audio_url, image_url, duration,
-           seen, reactions, reply_to,
-           forwarded, expires_at, created_at
-         FROM messages
-         WHERE chat_id=$1
-         ORDER BY created_at ASC
-         LIMIT 200`,
-        [chatId]
-      )
+      before
+        ? db.query(
+            `SELECT
+               id, chat_id, sender_id, type,
+               text, audio_url, image_url, duration,
+               seen, reactions, reply_to,
+               forwarded, expires_at, created_at
+             FROM messages
+             WHERE chat_id=$1 AND id < $2
+             ORDER BY created_at DESC
+             LIMIT $3`,
+            [chatId, before, PAGE]
+          )
+        : db.query(
+            `SELECT
+               id, chat_id, sender_id, type,
+               text, audio_url, image_url, duration,
+               seen, reactions, reply_to,
+               forwarded, expires_at, created_at
+             FROM messages
+             WHERE chat_id=$1
+             ORDER BY created_at DESC
+             LIMIT $2`,
+            [chatId, PAGE]
+          )
     ]);
 
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-    res.json(r.rows);
+
+    // نعكس الترتيب ليكون تصاعدياً (الأقدم أولاً) — واجهة المستخدم تتوقع هذا
+    var msgs    = r.rows.reverse();
+    var hasMore = r.rows.length === PAGE;
+    res.json({ messages: msgs, has_more: hasMore });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
