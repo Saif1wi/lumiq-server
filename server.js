@@ -477,6 +477,18 @@ app.get('/api/block/status/:userId', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
+app.get('/api/blocks', auth, async function(req, res) {
+  try {
+    var result = await db.query(
+      'SELECT u.id, u.name, u.username, u.photo_url, u.is_verified, b.created_at as blocked_at ' +
+      'FROM blocks b JOIN users u ON b.blocked_id = u.id ' +
+      'WHERE b.blocker_id = $1 ORDER BY b.created_at DESC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+});
+
 // ═══ FRIENDS ═══
 app.post('/api/friends/request', auth, rateLimit(20, 60000), async function(req, res) {
   try {
@@ -580,68 +592,12 @@ app.post('/api/chats', auth, async function(req, res) {
 
 app.get('/api/chats', auth, async function(req, res) {
   try {
-    var myId = String(req.user.id);
     var r = await db.query(
-      `SELECT
-         c.id, c.participants, c.last_message, c.last_message_at, c.unread_count,
-         u.id          AS other_id,
-         u.name        AS other_name,
-         u.username    AS other_username,
-         u.photo_url   AS other_photo,
-         u.bio         AS other_bio,
-         u.nickname    AS other_nickname,
-         u.is_online   AS other_is_online,
-         u.is_verified AS other_is_verified,
-         u.last_seen   AS other_last_seen,
-         u.show_online AS other_show_online,
-         u.show_last_seen AS other_show_last_seen,
-         u.battery_level  AS other_battery_level,
-         u.show_battery   AS other_show_battery,
-         u.show_join_date AS other_show_join_date,
-         u.created_at  AS other_created_at
-       FROM chats c
-       JOIN users u ON u.id = (
-         SELECT CAST(p AS INT)
-         FROM unnest(c.participants) AS p
-         WHERE p != $1
-         LIMIT 1
-       )
-       WHERE $1 = ANY(c.participants)
-       ORDER BY c.last_message_at DESC NULLS LAST
-       LIMIT 100`,
-      [myId]
+      'SELECT * FROM chats WHERE $1=ANY(participants) ORDER BY last_message_at DESC NULLS LAST LIMIT 100',
+      [String(req.user.id)]
     );
-
-    // نبني الـ response بنفس الشكل اللي يتوقعه Flutter
-    var chats = r.rows.map(function(row) {
-      return {
-        id:              row.id,
-        participants:    row.participants,
-        last_message:    row.last_message,
-        last_message_at: row.last_message_at,
-        unread_count:    row.unread_count,
-        other_user: {
-          id:              row.other_id,
-          name:            row.other_name,
-          username:        row.other_username,
-          photo_url:       row.other_photo,
-          bio:             row.other_bio,
-          nickname:        row.other_nickname,
-          is_online:       row.other_is_online,
-          is_verified:     row.other_is_verified,
-          last_seen:       row.other_last_seen,
-          show_online:     row.other_show_online,
-          show_last_seen:  row.other_show_last_seen,
-          battery_level:   row.other_battery_level,
-          show_battery:    row.other_show_battery,
-          show_join_date:  row.other_show_join_date,
-          created_at:      row.other_created_at
-        }
-      };
-    });
-
-    res.json(chats);
-  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
 // ═══ MESSAGES ═══
@@ -662,47 +618,11 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
-
-    // before = id آخر رسالة معروفة — للتحميل التدريجي عند السحب للأعلى
-    var before  = req.query.before ? parseInt(req.query.before) : null;
-    var PAGE    = 30;
-
-    // تحقق من العضوية + جلب الرسائل بشكل متوازٍ
-    var [access, r] = await Promise.all([
-      db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]),
-      before
-        ? db.query(
-            `SELECT
-               id, chat_id, sender_id, type,
-               text, audio_url, image_url, duration,
-               seen, reactions, reply_to,
-               forwarded, expires_at, created_at
-             FROM messages
-             WHERE chat_id=$1 AND id < $2
-             ORDER BY created_at DESC
-             LIMIT $3`,
-            [chatId, before, PAGE]
-          )
-        : db.query(
-            `SELECT
-               id, chat_id, sender_id, type,
-               text, audio_url, image_url, duration,
-               seen, reactions, reply_to,
-               forwarded, expires_at, created_at
-             FROM messages
-             WHERE chat_id=$1
-             ORDER BY created_at DESC
-             LIMIT $2`,
-            [chatId, PAGE]
-          )
-    ]);
-
+    // تحقق من أن المستخدم عضو في المحادثة
+    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-
-    // نعكس الترتيب ليكون تصاعدياً (الأقدم أولاً) — واجهة المستخدم تتوقع هذا
-    var msgs    = r.rows.reverse();
-    var hasMore = r.rows.length === PAGE;
-    res.json({ messages: msgs, has_more: hasMore });
+    var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [chatId]);
+    res.json(r.rows);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -1362,17 +1282,8 @@ io.on('connection', function(socket) {
     if (!socket.userId || data.level === undefined) return;
     var level = Math.round(Math.max(0, Math.min(100, Number(data.level))));
     try {
-      // ① حدّث DB والغرف بشكل متوازٍ — لا انتظار
-      var [, chats] = await Promise.all([
-        db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]),
-        db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)])
-      ]);
-
-      // ② أرسل فقط لأصحاب المحادثات المشتركة — لا للجميع
-      var payload = { user_id: socket.userId, level: level };
-      chats.rows.forEach(function(c) {
-        socket.to(c.id).emit('battery_changed', payload);
-      });
+      await db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]);
+      socket.broadcast.emit('battery_changed', { user_id: socket.userId, level: level });
     } catch(e) {}
   });
 
