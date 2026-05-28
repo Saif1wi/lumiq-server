@@ -117,6 +117,25 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
+
+  await db.query(`CREATE TABLE IF NOT EXISTS stories (
+    id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type TEXT NOT NULL DEFAULT 'image',
+    image_url TEXT DEFAULT NULL,
+    text TEXT DEFAULT NULL,
+    text_bg_color TEXT DEFAULT '#0A84FF',
+    expires_at TIMESTAMP NOT NULL DEFAULT (NOW() + INTERVAL '24 hours'),
+    created_at TIMESTAMP DEFAULT NOW()
+  )`);
+
+  await db.query(`CREATE TABLE IF NOT EXISTS story_views (
+    story_id INT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    viewer_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    viewed_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (story_id, viewer_id)
+  )`);
+
   // إضافة سلايدات افتراضية إذا كان الجدول فارغاً
   var slidesCount = await db.query('SELECT COUNT(*) FROM slides');
   if (parseInt(slidesCount.rows[0].count) === 0) {
@@ -580,68 +599,12 @@ app.post('/api/chats', auth, async function(req, res) {
 
 app.get('/api/chats', auth, async function(req, res) {
   try {
-    var myId = String(req.user.id);
     var r = await db.query(
-      `SELECT
-         c.id, c.participants, c.last_message, c.last_message_at, c.unread_count,
-         u.id          AS other_id,
-         u.name        AS other_name,
-         u.username    AS other_username,
-         u.photo_url   AS other_photo,
-         u.bio         AS other_bio,
-         u.nickname    AS other_nickname,
-         u.is_online   AS other_is_online,
-         u.is_verified AS other_is_verified,
-         u.last_seen   AS other_last_seen,
-         u.show_online AS other_show_online,
-         u.show_last_seen AS other_show_last_seen,
-         u.battery_level  AS other_battery_level,
-         u.show_battery   AS other_show_battery,
-         u.show_join_date AS other_show_join_date,
-         u.created_at  AS other_created_at
-       FROM chats c
-       JOIN users u ON u.id = (
-         SELECT CAST(p AS INT)
-         FROM unnest(c.participants) AS p
-         WHERE p != $1
-         LIMIT 1
-       )
-       WHERE $1 = ANY(c.participants)
-       ORDER BY c.last_message_at DESC NULLS LAST
-       LIMIT 100`,
-      [myId]
+      'SELECT * FROM chats WHERE $1=ANY(participants) ORDER BY last_message_at DESC NULLS LAST LIMIT 100',
+      [String(req.user.id)]
     );
-
-    // نبني الـ response بنفس الشكل اللي يتوقعه Flutter
-    var chats = r.rows.map(function(row) {
-      return {
-        id:              row.id,
-        participants:    row.participants,
-        last_message:    row.last_message,
-        last_message_at: row.last_message_at,
-        unread_count:    row.unread_count,
-        other_user: {
-          id:              row.other_id,
-          name:            row.other_name,
-          username:        row.other_username,
-          photo_url:       row.other_photo,
-          bio:             row.other_bio,
-          nickname:        row.other_nickname,
-          is_online:       row.other_is_online,
-          is_verified:     row.other_is_verified,
-          last_seen:       row.other_last_seen,
-          show_online:     row.other_show_online,
-          show_last_seen:  row.other_show_last_seen,
-          battery_level:   row.other_battery_level,
-          show_battery:    row.other_show_battery,
-          show_join_date:  row.other_show_join_date,
-          created_at:      row.other_created_at
-        }
-      };
-    });
-
-    res.json(chats);
-  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
 // ═══ MESSAGES ═══
@@ -662,25 +625,10 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
-
-    // تحقق من العضوية + جلب الرسائل بشكل متوازٍ
-    var [access, r] = await Promise.all([
-      db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]),
-      db.query(
-        `SELECT
-           id, chat_id, sender_id, type,
-           text, audio_url, image_url, duration,
-           seen, reactions, reply_to,
-           forwarded, expires_at, created_at
-         FROM messages
-         WHERE chat_id=$1
-         ORDER BY created_at ASC
-         LIMIT 200`,
-        [chatId]
-      )
-    ]);
-
+    // تحقق من أن المستخدم عضو في المحادثة
+    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [chatId]);
     res.json(r.rows);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -1341,17 +1289,8 @@ io.on('connection', function(socket) {
     if (!socket.userId || data.level === undefined) return;
     var level = Math.round(Math.max(0, Math.min(100, Number(data.level))));
     try {
-      // ① حدّث DB والغرف بشكل متوازٍ — لا انتظار
-      var [, chats] = await Promise.all([
-        db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]),
-        db.query('SELECT id FROM chats WHERE $1=ANY(participants)', [String(socket.userId)])
-      ]);
-
-      // ② أرسل فقط لأصحاب المحادثات المشتركة — لا للجميع
-      var payload = { user_id: socket.userId, level: level };
-      chats.rows.forEach(function(c) {
-        socket.to(c.id).emit('battery_changed', payload);
-      });
+      await db.query('UPDATE users SET battery_level=$1 WHERE id=$2', [level, socket.userId]);
+      socket.broadcast.emit('battery_changed', { user_id: socket.userId, level: level });
     } catch(e) {}
   });
 
@@ -1462,6 +1401,135 @@ io.on('connection', function(socket) {
     } catch(e) { console.error('disconnect error:', e.message); }
   });
 });
+
+
+// ═══════════════════════════════════════════════
+// ── STORIES ──
+// ═══════════════════════════════════════════════
+
+// جلب قصص الأصدقاء + قصصي
+app.get('/api/stories/friends', auth, async function(req, res) {
+  try {
+    var result = await db.query(`
+      SELECT
+        s.id, s.user_id, s.type, s.image_url, s.text, s.text_bg_color,
+        s.created_at, s.expires_at,
+        u.name, u.username, u.photo_url, u.is_verified,
+        COALESCE(
+          ARRAY(SELECT viewer_id FROM story_views WHERE story_id = s.id),
+          '{}'::int[]
+        ) AS viewed_by,
+        (s.user_id = $1) AS is_mine
+      FROM stories s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.expires_at > NOW()
+        AND (
+          s.user_id = $1
+          OR s.user_id IN (
+            SELECT CASE WHEN user_id = $1 THEN friend_id ELSE user_id END
+            FROM friendships
+            WHERE (user_id = $1 OR friend_id = $1) AND status = 'accepted'
+          )
+        )
+      ORDER BY s.created_at DESC
+    `, [req.userId]);
+
+    var stories = result.rows.map(function(r) {
+      return {
+        id: r.id,
+        user_id: r.user_id,
+        type: r.type,
+        image_url: r.image_url,
+        text: r.text,
+        text_bg_color: r.text_bg_color,
+        created_at: r.created_at,
+        expires_at: r.expires_at,
+        display_name: r.name,
+        username: r.username,
+        photo_url: r.photo_url,
+        is_verified: r.is_verified,
+        viewed_by: r.viewed_by,
+        is_mine: r.is_mine
+      };
+    });
+    res.json(stories);
+  } catch(e) {
+    console.error('GET /api/stories/friends error:', e.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+// إضافة قصة نصية
+app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), async function(req, res) {
+  try {
+    var type = req.body.type || 'text';
+    var imageUrl = null;
+
+    if (type === 'image') {
+      if (!req.file) return res.status(400).json({ error: 'الصورة مطلوبة' });
+      var uploadResult = await new Promise(function(resolve, reject) {
+        var stream = cloudinary.uploader.upload_stream(
+          { folder: 'lumiq/stories', resource_type: 'image' },
+          function(err, result) { if (err) reject(err); else resolve(result); }
+        );
+        stream.end(req.file.buffer);
+      });
+      imageUrl = uploadResult.secure_url;
+    } else {
+      if (!req.body.text || !req.body.text.trim()) {
+        return res.status(400).json({ error: 'النص مطلوب' });
+      }
+    }
+
+    var result = await db.query(`
+      INSERT INTO stories (user_id, type, image_url, text, text_bg_color)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, user_id, type, image_url, text, text_bg_color, created_at, expires_at
+    `, [req.userId, type, imageUrl, req.body.text || null, req.body.text_bg_color || '#0A84FF']);
+
+    res.json(result.rows[0]);
+  } catch(e) {
+    console.error('POST /api/stories error:', e.message);
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+// تسجيل مشاهدة قصة
+app.post('/api/stories/:id/view', auth, async function(req, res) {
+  try {
+    var storyId = parseInt(req.params.id);
+    await db.query(`
+      INSERT INTO story_views (story_id, viewer_id)
+      VALUES ($1, $2)
+      ON CONFLICT (story_id, viewer_id) DO NOTHING
+    `, [storyId, req.userId]);
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+// حذف قصة
+app.delete('/api/stories/:id', auth, async function(req, res) {
+  try {
+    var storyId = parseInt(req.params.id);
+    var result = await db.query(
+      'DELETE FROM stories WHERE id=$1 AND user_id=$2 RETURNING id',
+      [storyId, req.userId]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'القصة غير موجودة' });
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: 'خطأ في الخادم' });
+  }
+});
+
+// تنظيف القصص المنتهية كل ساعة
+setInterval(async function() {
+  try {
+    await db.query('DELETE FROM stories WHERE expires_at < NOW()');
+  } catch(e) { console.error('Stories cleanup error:', e.message); }
+}, 60 * 60 * 1000);
 
 // ═══ START ═══
 initDB().then(function() {
