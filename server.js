@@ -477,18 +477,6 @@ app.get('/api/block/status/:userId', auth, async function(req, res) {
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-app.get('/api/blocks', auth, async function(req, res) {
-  try {
-    var result = await db.query(
-      'SELECT u.id, u.name, u.username, u.photo_url, u.is_verified, b.created_at as blocked_at ' +
-      'FROM blocks b JOIN users u ON b.blocked_id = u.id ' +
-      'WHERE b.blocker_id = $1 ORDER BY b.created_at DESC',
-      [req.user.id]
-    );
-    res.json(result.rows);
-  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
-});
-
 // ═══ FRIENDS ═══
 app.post('/api/friends/request', auth, rateLimit(20, 60000), async function(req, res) {
   try {
