@@ -603,7 +603,38 @@ app.get('/api/chats', auth, async function(req, res) {
       'SELECT * FROM chats WHERE $1=ANY(participants) ORDER BY last_message_at DESC NULLS LAST LIMIT 100',
       [String(req.user.id)]
     );
-    res.json(r.rows);
+
+    // أضف بيانات المستخدم الثاني لكل محادثة
+    var chats = await Promise.all(r.rows.map(async function(chat) {
+      var otherPid = (chat.participants || []).find(function(p) {
+        return String(p) !== String(req.user.id);
+      });
+      if (!otherPid) return chat;
+
+      var userRow = await db.query(
+        'SELECT id, name, username, photo_url, is_online, is_verified, last_seen, show_last_seen, show_online, battery_level, show_battery FROM users WHERE id=$1',
+        [otherPid]
+      );
+      if (!userRow.rows.length) return chat;
+      var u = userRow.rows[0];
+      return Object.assign({}, chat, {
+        other_user: {
+          id: u.id,
+          name: u.name,
+          username: u.username,
+          photo_url: u.photo_url,
+          is_online: u.is_online,
+          is_verified: u.is_verified,
+          last_seen: u.last_seen,
+          show_last_seen: u.show_last_seen,
+          show_online: u.show_online,
+          battery_level: u.battery_level,
+          show_battery: u.show_battery
+        }
+      });
+    }));
+
+    res.json(chats);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -1407,18 +1438,13 @@ io.on('connection', function(socket) {
 // ── STORIES ──
 // ═══════════════════════════════════════════════
 
-// جلب قصص الأصدقاء + قصصي
 app.get('/api/stories/friends', auth, async function(req, res) {
   try {
     var result = await db.query(`
-      SELECT
-        s.id, s.user_id, s.type, s.image_url, s.text, s.text_bg_color,
+      SELECT s.id, s.user_id, s.type, s.image_url, s.text, s.text_bg_color,
         s.created_at, s.expires_at,
         u.name, u.username, u.photo_url, u.is_verified,
-        COALESCE(
-          ARRAY(SELECT viewer_id FROM story_views WHERE story_id = s.id),
-          '{}'::int[]
-        ) AS viewed_by,
+        COALESCE(ARRAY(SELECT viewer_id FROM story_views WHERE story_id = s.id), '{}'::int[]) AS viewed_by,
         (s.user_id = $1) AS is_mine
       FROM stories s
       JOIN users u ON u.id = s.user_id
@@ -1434,101 +1460,74 @@ app.get('/api/stories/friends', auth, async function(req, res) {
       ORDER BY s.created_at DESC
     `, [req.userId]);
 
-    var stories = result.rows.map(function(r) {
+    res.json(result.rows.map(function(r) {
       return {
-        id: r.id,
-        user_id: r.user_id,
-        type: r.type,
-        image_url: r.image_url,
-        text: r.text,
-        text_bg_color: r.text_bg_color,
-        created_at: r.created_at,
-        expires_at: r.expires_at,
-        display_name: r.name,
-        username: r.username,
-        photo_url: r.photo_url,
-        is_verified: r.is_verified,
-        viewed_by: r.viewed_by,
-        is_mine: r.is_mine
+        id: r.id, user_id: r.user_id, type: r.type,
+        image_url: r.image_url, text: r.text, text_bg_color: r.text_bg_color,
+        created_at: r.created_at, expires_at: r.expires_at,
+        display_name: r.name, username: r.username,
+        photo_url: r.photo_url, is_verified: r.is_verified,
+        viewed_by: r.viewed_by, is_mine: r.is_mine
       };
-    });
-    res.json(stories);
+    }));
   } catch(e) {
-    console.error('GET /api/stories/friends error:', e.message);
+    console.error('GET /api/stories/friends:', e.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
 
-// إضافة قصة نصية
 app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), async function(req, res) {
   try {
     var type = req.body.type || 'text';
     var imageUrl = null;
-
     if (type === 'image') {
       if (!req.file) return res.status(400).json({ error: 'الصورة مطلوبة' });
-      var uploadResult = await new Promise(function(resolve, reject) {
+      var up = await new Promise(function(resolve, reject) {
         var stream = cloudinary.uploader.upload_stream(
           { folder: 'lumiq/stories', resource_type: 'image' },
-          function(err, result) { if (err) reject(err); else resolve(result); }
+          function(err, r) { if (err) reject(err); else resolve(r); }
         );
         stream.end(req.file.buffer);
       });
-      imageUrl = uploadResult.secure_url;
+      imageUrl = up.secure_url;
     } else {
-      if (!req.body.text || !req.body.text.trim()) {
-        return res.status(400).json({ error: 'النص مطلوب' });
-      }
+      if (!req.body.text || !req.body.text.trim()) return res.status(400).json({ error: 'النص مطلوب' });
     }
-
-    var result = await db.query(`
-      INSERT INTO stories (user_id, type, image_url, text, text_bg_color)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, user_id, type, image_url, text, text_bg_color, created_at, expires_at
-    `, [req.userId, type, imageUrl, req.body.text || null, req.body.text_bg_color || '#0A84FF']);
-
-    res.json(result.rows[0]);
+    var r = await db.query(
+      'INSERT INTO stories (user_id, type, image_url, text, text_bg_color) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [req.userId, type, imageUrl, req.body.text || null, req.body.text_bg_color || '#0A84FF']
+    );
+    res.json(r.rows[0]);
   } catch(e) {
-    console.error('POST /api/stories error:', e.message);
+    console.error('POST /api/stories:', e.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
 });
 
-// تسجيل مشاهدة قصة
 app.post('/api/stories/:id/view', auth, async function(req, res) {
   try {
-    var storyId = parseInt(req.params.id);
-    await db.query(`
-      INSERT INTO story_views (story_id, viewer_id)
-      VALUES ($1, $2)
-      ON CONFLICT (story_id, viewer_id) DO NOTHING
-    `, [storyId, req.userId]);
+    await db.query(
+      'INSERT INTO story_views (story_id, viewer_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [parseInt(req.params.id), req.userId]
+    );
     res.json({ ok: true });
-  } catch(e) {
-    res.status(500).json({ error: 'خطأ في الخادم' });
-  }
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// حذف قصة
 app.delete('/api/stories/:id', auth, async function(req, res) {
   try {
-    var storyId = parseInt(req.params.id);
-    var result = await db.query(
+    var r = await db.query(
       'DELETE FROM stories WHERE id=$1 AND user_id=$2 RETURNING id',
-      [storyId, req.userId]
+      [parseInt(req.params.id), req.userId]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'القصة غير موجودة' });
+    if (!r.rows.length) return res.status(404).json({ error: 'غير موجودة' });
     res.json({ ok: true });
-  } catch(e) {
-    res.status(500).json({ error: 'خطأ في الخادم' });
-  }
+  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
-// تنظيف القصص المنتهية كل ساعة
 setInterval(async function() {
-  try {
-    await db.query('DELETE FROM stories WHERE expires_at < NOW()');
-  } catch(e) { console.error('Stories cleanup error:', e.message); }
+  try { await db.query('DELETE FROM stories WHERE expires_at < NOW()'); }
+  catch(e) { console.error('Stories cleanup:', e.message); }
 }, 60 * 60 * 1000);
 
 // ═══ START ═══
