@@ -605,24 +605,60 @@ app.post('/api/chats', auth, async function(req, res) {
 
 app.get('/api/chats', auth, async function(req, res) {
   try {
-    var r = await db.query(
-      'SELECT * FROM chats WHERE $1=ANY(participants) ORDER BY last_message_at DESC NULLS LAST LIMIT 100',
-      [String(req.user.id)]
-    );
-    var chats = await Promise.all(r.rows.map(async function(chat) {
-      var otherPid = (chat.participants || []).find(function(p) {
-        return String(p) !== String(req.user.id);
-      });
-      if (!otherPid) return chat;
-      var u = await db.query(
-        'SELECT id,name,username,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,battery_level,show_battery FROM users WHERE id=$1',
-        [otherPid]
-      );
-      if (!u.rows.length) return chat;
-      return Object.assign({}, chat, { other_user: u.rows[0] });
-    }));
+    // استعلام واحد يجلب المحادثات مع بيانات المستخدم الآخر دفعة واحدة
+    var r = await db.query(`
+      SELECT
+        c.*,
+        u.id        AS ou_id,
+        u.name      AS ou_name,
+        u.username  AS ou_username,
+        u.photo_url AS ou_photo_url,
+        u.is_online AS ou_is_online,
+        u.is_verified AS ou_is_verified,
+        u.last_seen AS ou_last_seen,
+        u.show_last_seen AS ou_show_last_seen,
+        u.show_online AS ou_show_online,
+        u.battery_level AS ou_battery_level,
+        u.show_battery AS ou_show_battery
+      FROM chats c
+      LEFT JOIN users u ON u.id = (
+        SELECT p::int FROM unnest(c.participants) p
+        WHERE p != $1 LIMIT 1
+      )
+      WHERE $1 = ANY(c.participants)
+      ORDER BY c.last_message_at DESC NULLS LAST
+      LIMIT 100
+    `, [String(req.user.id)]);
+
+    var chats = r.rows.map(function(row) {
+      var chat = {
+        id: row.id,
+        participants: row.participants,
+        last_message: row.last_message,
+        last_message_at: row.last_message_at,
+        unread_count: row.unread_count,
+        read_at: row.read_at
+      };
+      if (row.ou_id) {
+        chat.other_user = {
+          id: row.ou_id,
+          name: row.ou_name,
+          username: row.ou_username,
+          photo_url: row.ou_photo_url,
+          is_online: row.ou_is_online,
+          is_verified: row.ou_is_verified,
+          last_seen: row.ou_last_seen,
+          show_last_seen: row.ou_show_last_seen,
+          show_online: row.ou_show_online,
+          battery_level: row.ou_battery_level,
+          show_battery: row.ou_show_battery
+        };
+      }
+      return chat;
+    });
+
     res.json(chats);
-  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
 // ═══ MESSAGES ═══
