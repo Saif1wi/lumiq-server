@@ -890,29 +890,49 @@ app.post('/api/chats/:chatId/read', auth, async function(req, res) {
   try {
     var chatId = s(req.params.chatId);
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
-    // ── رد فوري للـ client بدون انتظار DB ──
+
+    // تحقق من العضوية
+    var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+
+    // transaction واحدة: إما ينجح كل شيء أو يفشل كل شيء
+    var client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      // الخطوة 1: تحديث الرسائل
+      await client.query(
+        'UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false',
+        [chatId, req.user.id]
+      );
+
+      // الخطوة 2: تحديث عداد المحادثة في نفس العملية
+      var now = new Date().toISOString();
+      var uid = String(req.user.id);
+      var chatRow = await client.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [chatId]);
+      if (chatRow.rows.length) {
+        var uc = chatRow.rows[0].unread_count || {};
+        var ra = chatRow.rows[0].read_at || {};
+        uc[uid] = 0;
+        ra[uid] = now;
+        await client.query(
+          'UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3',
+          [JSON.stringify(uc), JSON.stringify(ra), chatId]
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch(e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
     res.json({ ok: true });
-    // ── تحديث DB بشكل غير متزامن (لا يُبطئ تجربة المستخدم) ──
-    db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)])
-      .then(function(access) {
-        if (!access.rows.length) return;
-        return db.query('UPDATE messages SET seen=true WHERE chat_id=$1 AND sender_id!=$2 AND seen=false', [chatId, req.user.id])
-          .then(function() {
-            return db.query('SELECT unread_count, read_at FROM chats WHERE id=$1', [chatId]);
-          })
-          .then(function(chatRow) {
-            if (!chatRow.rows.length) return;
-            var uc = chatRow.rows[0].unread_count || {};
-            uc[String(req.user.id)] = 0;
-            var ra = chatRow.rows[0].read_at || {};
-            ra[String(req.user.id)] = new Date().toISOString();
-            return db.query('UPDATE chats SET unread_count=$1, read_at=$2 WHERE id=$3',
-              [JSON.stringify(uc), JSON.stringify(ra), chatId]);
-          });
-      })
-      .catch(function(e) { console.error('markRead async error:', e.message); });
-  } catch(e) { res.status(500).json({ error: 'خطأ' }); }
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
+
 
 // ═══ NOTIFICATIONS ═══
 app.get('/api/notifications', auth, async function(req, res) {
