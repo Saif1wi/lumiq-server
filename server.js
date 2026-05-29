@@ -1463,13 +1463,11 @@ app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), asy
 
     if (type === 'image') {
       if (!req.file) return res.status(400).json({ error: 'الصورة مطلوبة' });
-      var up = await new Promise(function(resolve, reject) {
-        var stream = cloudinary.uploader.upload_stream(
-          { folder: 'lumiq/stories', resource_type: 'image' },
-          function(err, r) { if (err) reject(err); else resolve(r); }
-        );
-        stream.end(req.file.buffer);
-      });
+      var b64 = req.file.buffer.toString('base64');
+      var up = await cloudinary.uploader.upload(
+        'data:' + req.file.mimetype + ';base64,' + b64,
+        { folder: 'lumiq/stories' }
+      );
       imageUrl = up.secure_url;
     } else {
       if (!req.body.text || !req.body.text.trim()) {
