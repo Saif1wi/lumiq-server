@@ -432,7 +432,7 @@ app.get('/api/users/search', auth, async function(req, res) {
       'SELECT id,name,username,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE (username ILIKE $1 OR name ILIKE $1) AND id!=$2 AND is_banned=false LIMIT 20',
       ['%' + q + '%', req.user.id]
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -561,7 +561,7 @@ app.get('/api/friends', auth, async function(req, res) {
       'SELECT u.id,u.name,u.username,u.photo_url,u.is_online,u.is_verified,u.last_seen,u.show_online,u.show_last_seen,u.battery_level,u.show_battery, f.status, f.requester_id FROM friendships f JOIN users u ON (CASE WHEN f.requester_id=$1 THEN f.addressee_id ELSE f.requester_id END)=u.id WHERE (f.requester_id=$1 OR f.addressee_id=$1) ORDER BY f.created_at DESC',
       [req.user.id]
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -571,7 +571,7 @@ app.get('/api/friends/requests', auth, async function(req, res) {
       'SELECT u.id,u.name,u.username,u.photo_url,u.is_verified,f.created_at FROM friendships f JOIN users u ON f.requester_id=u.id WHERE f.addressee_id=$1 AND f.status=$2 ORDER BY f.created_at DESC',
       [req.user.id, 'pending']
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -682,8 +682,11 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
     // تحقق من أن المستخدم عضو في المحادثة
     var access = await db.query('SELECT id FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-    var r = await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at ASC LIMIT 200', [chatId]);
-    res.json(r.rows);
+    var before = req.query.before ? parseInt(req.query.before) : null;
+    var r = before
+      ? await db.query("SELECT * FROM messages WHERE chat_id=$1 AND id < $2 ORDER BY created_at DESC LIMIT 30", [chatId, before])
+      : await db.query("SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at DESC LIMIT 30", [chatId]);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -919,7 +922,7 @@ app.get('/api/notifications', auth, async function(req, res) {
       [req.user.id]
     );
     // FIX: إرجاع array مباشرة بدلاً من { notifications: [] }
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -944,14 +947,14 @@ app.post('/api/notifications/read', auth, async function(req, res) {
 app.get('/api/slides', async function(req, res) {
   try {
     var r = await db.query('SELECT * FROM slides WHERE is_active=true ORDER BY sort_order ASC, id ASC');
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
 app.get('/api/admin/slides', adminAuth, async function(req, res) {
   try {
     var r = await db.query('SELECT * FROM slides ORDER BY sort_order ASC, id ASC');
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -1093,7 +1096,7 @@ app.get('/api/admin/messages', adminAuth, async function(req, res) {
       ? 'SELECT m.id,m.text,m.type,m.image_url,m.audio_url,m.duration,m.created_at,u.name as sender_name,u.username as sender_username,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type=$1 ORDER BY m.created_at DESC LIMIT 50'
       : 'SELECT m.id,m.text,m.type,m.image_url,m.audio_url,m.duration,m.created_at,u.name as sender_name,u.username as sender_username,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id ORDER BY m.created_at DESC LIMIT 50';
     var r = type ? await db.query(query, [type]) : await db.query(query);
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1113,7 +1116,7 @@ app.get('/api/admin/images', adminAuth, async function(req, res) {
       "SELECT m.id,m.image_url,m.created_at,u.name as sender_name,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.type='image' ORDER BY m.created_at DESC LIMIT 20 OFFSET $1",
       [(page-1)*20]
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1152,7 +1155,7 @@ app.get('/api/admin/users/:id/chats', adminAuth, async function(req, res) {
       'SELECT c.*,(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id) as msg_count FROM chats c WHERE $1=ANY(c.participants) ORDER BY c.last_message_at DESC',
       [String(req.params.id)]
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1198,7 +1201,7 @@ app.get('/api/admin/chats/:id/messages', adminAuth, async function(req, res) {
       'SELECT m.*,u.name as sender_name,u.username,u.photo_url as sender_photo FROM messages m JOIN users u ON m.sender_id=u.id WHERE m.chat_id=$1 ORDER BY m.created_at DESC LIMIT 50',
       [req.params.id]
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1232,7 +1235,7 @@ app.post('/api/admin/broadcast', adminAuth, async function(req, res) {
 app.get('/api/admin/notifications', adminAuth, async function(req, res) {
   try {
     var r = await db.query('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100');
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1248,7 +1251,7 @@ app.get('/api/admin/blocks', adminAuth, async function(req, res) {
     var r = await db.query(
       'SELECT b.*,u1.name as blocker_name,u1.username as blocker_username,u1.photo_url as blocker_photo,u2.name as blocked_name,u2.username as blocked_username,u2.photo_url as blocked_photo FROM blocks b JOIN users u1 ON b.blocker_id=u1.id JOIN users u2 ON b.blocked_id=u2.id ORDER BY b.id DESC LIMIT 200'
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1266,7 +1269,7 @@ app.get('/api/admin/friends', adminAuth, async function(req, res) {
     var r = await db.query(
       'SELECT f.*,u1.name as requester_name,u1.username as requester_username,u1.photo_url as requester_photo,u2.name as addressee_name,u2.username as addressee_username,u2.photo_url as addressee_photo FROM friendships f JOIN users u1 ON f.requester_id=u1.id JOIN users u2 ON f.addressee_id=u2.id ORDER BY f.id DESC LIMIT 200'
     );
-    res.json(r.rows);
+    res.json(r.rows.reverse());
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
