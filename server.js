@@ -677,7 +677,7 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
     );
     var msg = r.rows[0];
 
-    updateChatMeta(chatId, req.user.id, text.trim()).catch(function(e){console.error("meta err",e.message);});
+    try { await updateChatMeta(chatId, req.user.id, text.trim()); } catch(e) { console.error("meta err", e.message); }
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -710,7 +710,7 @@ app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload
     );
     var msg = r.rows[0];
 
-    updateChatMeta(chatId, req.user.id, 'صورة 🖼️').catch(function(e){console.error('meta err',e.message);});
+    try { await updateChatMeta(chatId, req.user.id, 'صورة 🖼️'); } catch(e) { console.error('meta err', e.message); }
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -744,7 +744,7 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
     );
     var msg = r.rows[0];
 
-    updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية').catch(function(e){console.error('meta err',e.message);});
+    try { await updateChatMeta(chatId, req.user.id, '🎤 رسالة صوتية'); } catch(e) { console.error('meta err', e.message); }
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
@@ -792,7 +792,7 @@ app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
       lastMsg = text.trim();
     }
 
-    updateChatMeta(chatId, req.user.id, lastMsg).catch(function(e){console.error("meta err",e.message);});
+    try { await updateChatMeta(chatId, req.user.id, lastMsg); } catch(e) { console.error("meta err", e.message); }
     io.to(chatId).emit('new_message', msg);
     res.json(msg);
   } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
