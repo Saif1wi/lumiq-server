@@ -703,9 +703,9 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
     var before = req.query.before ? parseInt(req.query.before) : null;
     var r = before
-      ? await db.query("SELECT * FROM (SELECT * FROM messages WHERE chat_id=$1 AND id < $2 ORDER BY created_at DESC LIMIT 30) sub ORDER BY created_at ASC", [chatId, before])
-      : await db.query("SELECT * FROM (SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at DESC LIMIT 30) sub ORDER BY created_at ASC", [chatId]);
-    res.json(r.rows);
+      ? await db.query('SELECT * FROM messages WHERE chat_id=$1 AND id < $2 ORDER BY created_at ASC LIMIT 30', [chatId, before])
+      : await db.query('SELECT * FROM messages WHERE chat_id=$1 ORDER BY id DESC LIMIT 30', [chatId]);
+    res.json(before ? r.rows : r.rows.reverse());
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
@@ -1525,7 +1525,10 @@ app.get('/api/stories/friends', auth, async function(req, res) {
         created_at: r.created_at, expires_at: r.expires_at,
         display_name: r.name, username: r.username,
         photo_url: r.photo_url, is_verified: r.is_verified,
-        viewed_by: r.viewed_by, is_mine: r.is_mine
+        viewed_by: r.viewed_by,
+        views_count: (r.viewed_by || []).length,
+        views_icon: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+        is_mine: r.is_mine
       };
     }));
   } catch(e) {
@@ -1563,6 +1566,31 @@ app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), asy
     console.error('POST /api/stories:', e.message);
     res.status(500).json({ error: 'خطأ في الخادم' });
   }
+});
+
+// ── جلب قائمة من شاهد القصة (للمالك فقط) ──
+app.get('/api/stories/:id/viewers', auth, async function(req, res) {
+  try {
+    var storyId = parseInt(req.params.id);
+    if (isNaN(storyId)) return res.status(400).json({ error: 'معرف غير صالح' });
+
+    // تحقق أن القصة تخص المستخدم الحالي
+    var storyCheck = await db.query('SELECT user_id FROM stories WHERE id=$1', [storyId]);
+    if (!storyCheck.rows.length) return res.status(404).json({ error: 'القصة غير موجودة' });
+    if (String(storyCheck.rows[0].user_id) !== String(req.user.id)) {
+      return res.status(403).json({ error: 'غير مسموح' });
+    }
+
+    var r = await db.query(
+      `SELECT u.id, u.name, u.username, u.photo_url, u.is_verified, sv.viewed_at
+       FROM story_views sv
+       JOIN users u ON u.id = sv.viewer_id
+       WHERE sv.story_id = $1
+       ORDER BY sv.viewed_at DESC`,
+      [storyId]
+    );
+    res.json({ viewers: r.rows, count: r.rows.length });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'خطأ' }); }
 });
 
 app.post('/api/stories/:id/view', auth, async function(req, res) {
