@@ -665,7 +665,8 @@ app.get('/api/chats', auth, async function(req, res) {
 app.delete('/api/chats/:chatId/delete', auth, async function(req, res) {
   try {
     var chatId  = req.params.chatId;
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
     if (!chatRow.rows.length) return res.status(404).json({ error: 'المحادثة غير موجودة' });
     if (!chatRow.rows[0].participants.includes(String(req.user.id))) return res.status(403).json({ error: 'غير مسموح' });
     await db.query('DELETE FROM messages WHERE chat_id=$1', [chatId]);
@@ -700,11 +701,10 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
     if (!text || !text.trim()) return res.status(400).json({ error: 'الرسالة فارغة' });
 
     // التحقق من الحظر
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-    if (chatRow.rows.length) {
-      var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
-      if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
-    }
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+    if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
 
     var forwarded   = req.body.forwarded === true;
     var expires_sec = req.body.expires_after ? parseInt(req.body.expires_after) : null;
@@ -800,11 +800,10 @@ app.post('/api/chats/:chatId/messages/forward', auth, async function(req, res) {
     var duration  = parseInt(req.body.duration) || 0;
 
     // التحقق من الحظر
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1', [chatId]);
-    if (chatRow.rows.length) {
-      var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
-      if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
-    }
+    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
+    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
+    var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
+    if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
 
     var r, msg, lastMsg;
     if (type === 'voice' && audio_url) {
