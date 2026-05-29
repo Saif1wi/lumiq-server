@@ -1451,8 +1451,9 @@ app.get('/api/stories/friends', auth, async function(req, res) {
       };
     }));
   } catch(e) {
-    console.error('GET /api/stories/friends:', e.message);
-    res.status(500).json({ error: 'خطأ في الخادم' });
+    console.error('GET /api/stories/friends ERROR:', e.message);
+    console.error('STACK:', e.stack);
+    res.status(500).json({ error: e.message });
   }
 });
 
