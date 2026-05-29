@@ -703,9 +703,9 @@ app.get('/api/chats/:chatId/messages', auth, async function(req, res) {
     if (!access.rows.length) return res.status(403).json({ error: 'غير مسموح' });
     var before = req.query.before ? parseInt(req.query.before) : null;
     var r = before
-      ? await db.query("SELECT * FROM messages WHERE chat_id=$1 AND id < $2 ORDER BY created_at DESC LIMIT 30", [chatId, before])
-      : await db.query("SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at DESC LIMIT 30", [chatId]);
-    res.json(r.rows.reverse());
+      ? await db.query("SELECT * FROM (SELECT * FROM messages WHERE chat_id=$1 AND id < $2 ORDER BY created_at DESC LIMIT 30) sub ORDER BY created_at ASC", [chatId, before])
+      : await db.query("SELECT * FROM (SELECT * FROM messages WHERE chat_id=$1 ORDER BY created_at DESC LIMIT 30) sub ORDER BY created_at ASC", [chatId]);
+    res.json(r.rows);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
 
