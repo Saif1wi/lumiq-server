@@ -603,37 +603,18 @@ app.get('/api/chats', auth, async function(req, res) {
       'SELECT * FROM chats WHERE $1=ANY(participants) ORDER BY last_message_at DESC NULLS LAST LIMIT 100',
       [String(req.user.id)]
     );
-
-    // أضف بيانات المستخدم الثاني لكل محادثة
     var chats = await Promise.all(r.rows.map(async function(chat) {
       var otherPid = (chat.participants || []).find(function(p) {
         return String(p) !== String(req.user.id);
       });
       if (!otherPid) return chat;
-
-      var userRow = await db.query(
-        'SELECT id, name, username, photo_url, is_online, is_verified, last_seen, show_last_seen, show_online, battery_level, show_battery FROM users WHERE id=$1',
+      var u = await db.query(
+        'SELECT id,name,username,photo_url,is_online,is_verified,last_seen,show_last_seen,show_online,battery_level,show_battery FROM users WHERE id=$1',
         [otherPid]
       );
-      if (!userRow.rows.length) return chat;
-      var u = userRow.rows[0];
-      return Object.assign({}, chat, {
-        other_user: {
-          id: u.id,
-          name: u.name,
-          username: u.username,
-          photo_url: u.photo_url,
-          is_online: u.is_online,
-          is_verified: u.is_verified,
-          last_seen: u.last_seen,
-          show_last_seen: u.show_last_seen,
-          show_online: u.show_online,
-          battery_level: u.battery_level,
-          show_battery: u.show_battery
-        }
-      });
+      if (!u.rows.length) return chat;
+      return Object.assign({}, chat, { other_user: u.rows[0] });
     }));
-
     res.json(chats);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
@@ -1434,12 +1415,11 @@ io.on('connection', function(socket) {
 });
 
 
-// ═══════════════════════════════════════════════
-// ── STORIES ──
-// ═══════════════════════════════════════════════
+// ═══ STORIES ═══
 
 app.get('/api/stories/friends', auth, async function(req, res) {
   try {
+    var myId = req.user.id;
     var result = await db.query(`
       SELECT s.id, s.user_id, s.type, s.image_url, s.text, s.text_bg_color,
         s.created_at, s.expires_at,
@@ -1458,7 +1438,7 @@ app.get('/api/stories/friends', auth, async function(req, res) {
           )
         )
       ORDER BY s.created_at DESC
-    `, [req.userId]);
+    `, [myId]);
 
     res.json(result.rows.map(function(r) {
       return {
@@ -1480,6 +1460,7 @@ app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), asy
   try {
     var type = req.body.type || 'text';
     var imageUrl = null;
+
     if (type === 'image') {
       if (!req.file) return res.status(400).json({ error: 'الصورة مطلوبة' });
       var up = await new Promise(function(resolve, reject) {
@@ -1491,11 +1472,14 @@ app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), asy
       });
       imageUrl = up.secure_url;
     } else {
-      if (!req.body.text || !req.body.text.trim()) return res.status(400).json({ error: 'النص مطلوب' });
+      if (!req.body.text || !req.body.text.trim()) {
+        return res.status(400).json({ error: 'النص مطلوب' });
+      }
     }
+
     var r = await db.query(
       'INSERT INTO stories (user_id, type, image_url, text, text_bg_color) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [req.userId, type, imageUrl, req.body.text || null, req.body.text_bg_color || '#0A84FF']
+      [req.user.id, type, imageUrl, req.body.text || null, req.body.text_bg_color || '#0A84FF']
     );
     res.json(r.rows[0]);
   } catch(e) {
@@ -1508,7 +1492,7 @@ app.post('/api/stories/:id/view', auth, async function(req, res) {
   try {
     await db.query(
       'INSERT INTO story_views (story_id, viewer_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
-      [parseInt(req.params.id), req.userId]
+      [parseInt(req.params.id), req.user.id]
     );
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
@@ -1518,7 +1502,7 @@ app.delete('/api/stories/:id', auth, async function(req, res) {
   try {
     var r = await db.query(
       'DELETE FROM stories WHERE id=$1 AND user_id=$2 RETURNING id',
-      [parseInt(req.params.id), req.userId]
+      [parseInt(req.params.id), req.user.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجودة' });
     res.json({ ok: true });
