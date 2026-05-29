@@ -70,6 +70,7 @@ async function initDB() {
     seen BOOLEAN DEFAULT false,
     reactions JSONB DEFAULT '{}',
     reply_to JSONB,
+    story_reply JSONB,
     forwarded BOOLEAN DEFAULT false,
     expires_at TIMESTAMP DEFAULT NULL,
     created_at TIMESTAMP DEFAULT NOW()
@@ -716,6 +717,7 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
     var text     = s(req.body.text);
     if (text && text.length > 5000) return res.status(400).json({ error: 'الرسالة طويلة جداً' });
     var reply_to = req.body.reply_to;
+    var story_reply = req.body.story_reply || null;
     if (!text || !text.trim()) return res.status(400).json({ error: 'الرسالة فارغة' });
 
     // التحقق من الحظر
@@ -729,8 +731,8 @@ app.post('/api/chats/:chatId/messages', auth, rateLimit(60, 60000), async functi
     var expires_at  = expires_sec ? new Date(Date.now() + expires_sec * 1000).toISOString() : null;
 
     var r   = await db.query(
-      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,forwarded,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
-      [chatId, req.user.id, 'text', text.trim(), reply_to ? JSON.stringify(reply_to) : null, forwarded, expires_at]
+      'INSERT INTO messages (chat_id,sender_id,type,text,reply_to,story_reply,forwarded,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [chatId, req.user.id, 'text', text.trim(), reply_to ? JSON.stringify(reply_to) : null, story_reply ? JSON.stringify(story_reply) : null, forwarded, expires_at]
     );
     var msg = r.rows[0];
 
