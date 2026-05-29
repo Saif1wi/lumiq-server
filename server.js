@@ -231,6 +231,24 @@ async function checkBlock(userA, userB) {
   return r.rows.length > 0;
 }
 
+// دالة تجمع التحقق من العضوية والحظر في استعلام واحد
+async function getChatAccess(chatId, userId) {
+  var r = await db.query(
+    'SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)',
+    [chatId, String(userId)]
+  );
+  if (!r.rows.length) return { allowed: false, reason: 'غير مسموح' };
+  var otherPid = r.rows[0].participants.find(function(p) { return String(p) !== String(userId); });
+  if (otherPid) {
+    var blocked = await db.query(
+      'SELECT id FROM blocks WHERE (blocker_id=$1 AND blocked_id=$2) OR (blocker_id=$2 AND blocked_id=$1)',
+      [userId, otherPid]
+    );
+    if (blocked.rows.length) return { allowed: false, reason: 'blocked' };
+  }
+  return { allowed: true, otherPid: otherPid };
+}
+
 // ═══ APP ═══
 const app    = express();
 const server = http.createServer(app);
@@ -728,10 +746,8 @@ app.post('/api/chats/:chatId/messages/image', auth, rateLimit(30, 60000), upload
     if (!chatId) return res.status(400).json({ error: 'معرف غير صالح' });
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
 
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
-    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-    var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
-    if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
+    var access = await getChatAccess(chatId, req.user.id);
+    if (!access.allowed) return res.status(403).json({ error: access.reason });
 
     var b64 = req.file.buffer.toString('base64');
     var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
@@ -762,10 +778,8 @@ app.post('/api/chats/:chatId/messages/audio', auth, rateLimit(30, 60000), upload
     var duration = parseInt(req.body.duration) || 0;
     if (!req.file) return res.status(400).json({ error: 'لا يوجد ملف' });
 
-    var chatRow = await db.query('SELECT participants FROM chats WHERE id=$1 AND $2=ANY(participants)', [chatId, String(req.user.id)]);
-    if (!chatRow.rows.length) return res.status(403).json({ error: 'غير مسموح' });
-    var otherPid = chatRow.rows[0].participants.find(function(p) { return String(p) !== String(req.user.id); });
-    if (otherPid && await checkBlock(req.user.id, otherPid)) return res.status(403).json({ error: 'blocked' });
+    var access = await getChatAccess(chatId, req.user.id);
+    if (!access.allowed) return res.status(403).json({ error: access.reason });
 
     var b64 = req.file.buffer.toString('base64');
     var up  = await cloudinary.uploader.upload('data:' + req.file.mimetype + ';base64,' + b64, {
