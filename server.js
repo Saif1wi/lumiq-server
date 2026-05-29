@@ -1432,9 +1432,9 @@ app.get('/api/stories/friends', auth, async function(req, res) {
         AND (
           s.user_id = $1
           OR s.user_id IN (
-            SELECT CASE WHEN user_id = $1 THEN friend_id ELSE user_id END
+            SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END
             FROM friendships
-            WHERE (user_id = $1 OR friend_id = $1) AND status = 'accepted'
+            WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
           )
         )
       ORDER BY s.created_at DESC
