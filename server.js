@@ -1240,6 +1240,7 @@ app.get('/api/admin/online', adminAuth, function(req, res) {
 
 // ═══ SOCKET ═══
 var onlineUsers = {};
+var chatViewers = {}; // { chatId: Set of userIds } — من هو داخل المحادثة فعلاً
 
 io.on('connection', function(socket) {
 
@@ -1314,11 +1315,36 @@ io.on('connection', function(socket) {
 
   socket.on('viewing_chat', function(data) {
     if (!data || !data.chat_id || !socket.userId) return;
-    socket.to(data.chat_id).emit('partner_viewing', {
+    var chatId = data.chat_id;
+    var isViewing = !!data.is_viewing;
+
+    // تحديث قائمة المشاهدين
+    if (!chatViewers[chatId]) chatViewers[chatId] = new Set();
+    if (isViewing) {
+      chatViewers[chatId].add(socket.userId);
+    } else {
+      chatViewers[chatId].delete(socket.userId);
+    }
+
+    // أبلغ الطرف الثاني فقط
+    socket.to(chatId).emit('partner_viewing', {
       user_id:    socket.userId,
-      chat_id:    data.chat_id,
-      is_viewing: !!data.is_viewing,
-      _reply:     !!data._reply
+      chat_id:    chatId,
+      is_viewing: isViewing,
+    });
+  });
+
+  // عند قطع الاتصال — أزل من كل المحادثات وأبلغ الطرف الثاني
+  socket.on('disconnect', function() {
+    Object.keys(chatViewers).forEach(function(chatId) {
+      if (chatViewers[chatId] && chatViewers[chatId].has(socket.userId)) {
+        chatViewers[chatId].delete(socket.userId);
+        socket.to(chatId).emit('partner_viewing', {
+          user_id:    socket.userId,
+          chat_id:    chatId,
+          is_viewing: false,
+        });
+      }
     });
   });
 
