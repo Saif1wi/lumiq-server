@@ -129,6 +129,12 @@ async function initDB() {
     created_at TIMESTAMP DEFAULT NOW()
   )`);
 
+  // إضافة الأعمدة الناقصة إذا لم تكن موجودة
+  await db.query(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS text_bg_color TEXT DEFAULT '#0A84FF'`);
+  await db.query(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS text TEXT`);
+  await db.query(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS image_url TEXT`);
+  await db.query(`ALTER TABLE stories ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP DEFAULT (NOW() + INTERVAL '24 hours')`);
+
   await db.query(`CREATE TABLE IF NOT EXISTS story_views (
     story_id INT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
     viewer_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
