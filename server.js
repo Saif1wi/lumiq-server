@@ -1568,6 +1568,64 @@ app.post('/api/stories', auth, rateLimit(20, 60000), upload.single('image'), asy
   }
 });
 
+
+// ── جلب قصص مستخدم معين (للأصدقاء فقط) ──
+app.get('/api/stories/user/:userId', auth, async function(req, res) {
+  try {
+    var myId = req.user.id;
+    var targetId = parseInt(req.params.userId);
+    if (isNaN(targetId)) return res.status(400).json({ error: 'معرف غير صالح' });
+
+    // تحقق أن العلاقة صداقة أو هو نفسه
+    var isSelf = myId === targetId;
+    if (!isSelf) {
+      var friendship = await db.query(
+        `SELECT id FROM friendships
+         WHERE ((requester_id=$1 AND addressee_id=$2) OR (requester_id=$2 AND addressee_id=$1))
+         AND status='accepted'`,
+        [myId, targetId]
+      );
+      if (!friendship.rows.length) return res.json({ stories: [], has_stories: false });
+    }
+
+    var result = await db.query(`
+      SELECT s.id, s.user_id, s.type, s.image_url, s.text, s.text_bg_color,
+        s.created_at, s.expires_at,
+        u.name, u.username, u.photo_url, u.is_verified,
+        COALESCE(ARRAY(SELECT viewer_id FROM story_views WHERE story_id = s.id), '{}'::int[]) AS viewed_by,
+        ($1 = ANY(ARRAY(SELECT viewer_id FROM story_views WHERE story_id = s.id))) AS i_viewed,
+        (s.user_id = $1) AS is_mine
+      FROM stories s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.user_id = $2 AND s.expires_at > NOW()
+      ORDER BY s.created_at ASC
+    `, [myId, targetId]);
+
+    var stories = result.rows.map(function(r) {
+      return {
+        id: r.id, user_id: r.user_id, type: r.type,
+        image_url: r.image_url, text: r.text, text_bg_color: r.text_bg_color,
+        created_at: r.created_at, expires_at: r.expires_at,
+        display_name: r.name, username: r.username,
+        photo_url: r.photo_url, is_verified: r.is_verified,
+        viewed_by: r.viewed_by,
+        views_count: (r.viewed_by || []).length,
+        i_viewed: r.i_viewed,
+        is_mine: r.is_mine
+      };
+    });
+
+    res.json({
+      stories: stories,
+      has_stories: stories.length > 0,
+      all_viewed: stories.length > 0 && stories.every(function(s) { return s.i_viewed; })
+    });
+  } catch(e) {
+    console.error('GET /api/stories/user/:userId ERROR:', e.message);
+    res.status(500).json({ error: 'خطأ في السيرفر' });
+  }
+});
+
 // ── جلب قائمة من شاهد القصة (للمالك فقط) ──
 app.get('/api/stories/:id/viewers', auth, async function(req, res) {
   try {
