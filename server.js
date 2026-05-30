@@ -92,9 +92,9 @@ async function initDB() {
     note TEXT,
     status TEXT DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT NOW()
-  )\`);
+  )`);
 
-  await db.query(\`CREATE TABLE IF NOT EXISTS friendships (
+  await db.query(`CREATE TABLE IF NOT EXISTS friendships (
     id SERIAL PRIMARY KEY,
     requester_id INT REFERENCES users(id) ON DELETE CASCADE,
     addressee_id INT REFERENCES users(id) ON DELETE CASCADE,
