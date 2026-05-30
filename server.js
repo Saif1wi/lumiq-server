@@ -407,8 +407,9 @@ app.post('/api/login', rateLimit(5, 60000), async function(req, res) {
 // ═══ USERS ═══
 app.get('/api/me', auth, async function(req, res) {
   try {
-    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at FROM users WHERE id=$1', [req.user.id]);
+    var r = await db.query('SELECT id,name,username,email,bio,photo_url,nickname,is_online,is_verified,last_seen,show_last_seen,show_online,show_join_date,battery_level,show_battery,created_at,is_banned,ban_reason FROM users WHERE id=$1', [req.user.id]);
     if (!r.rows.length) return res.status(404).json({ error: 'غير موجود' });
+    if (r.rows[0].is_banned) return res.status(403).json({ error: 'banned', ban_reason: r.rows[0].ban_reason || '' });
     res.json(r.rows[0]);
   } catch(e) { res.status(500).json({ error: 'خطأ' }); }
 });
