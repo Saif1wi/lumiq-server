@@ -84,7 +84,17 @@ async function initDB() {
     UNIQUE(blocker_id, blocked_id)
   )`);
 
-  await db.query(`CREATE TABLE IF NOT EXISTS friendships (
+  await db.query(`CREATE TABLE IF NOT EXISTS reports (
+    id SERIAL PRIMARY KEY,
+    reporter_id INT REFERENCES users(id) ON DELETE CASCADE,
+    reported_id INT REFERENCES users(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    note TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT NOW()
+  )\`);
+
+  await db.query(\`CREATE TABLE IF NOT EXISTS friendships (
     id SERIAL PRIMARY KEY,
     requester_id INT REFERENCES users(id) ON DELETE CASCADE,
     addressee_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -1296,6 +1306,57 @@ app.delete('/api/admin/blocks', adminAuth, async function(req, res) {
     var blocker = req.query.blocker, blocked = req.query.blocked;
     if (!blocker || !blocked) return res.status(400).json({ error: 'مطلوب blocker و blocked' });
     await db.query('DELETE FROM blocks WHERE blocker_id=$1 AND blocked_id=$2', [blocker, blocked]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══ REPORTS ADMIN ══
+app.get('/api/admin/reports', adminAuth, async function(req, res) {
+  try {
+    var status = req.query.status || null;
+    var query = `
+      SELECT r.*, 
+        u1.name AS reporter_name, u1.photo_url AS reporter_photo,
+        u2.name AS reported_name, u2.photo_url AS reported_photo
+      FROM reports r
+      JOIN users u1 ON r.reporter_id = u1.id
+      JOIN users u2 ON r.reported_id = u2.id
+      ${status ? "WHERE r.status = $1" : ""}
+      ORDER BY r.created_at DESC LIMIT 200
+    `;
+    var r = status ? await db.query(query, [status]) : await db.query(query);
+    res.json(r.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/admin/reports/:id', adminAuth, async function(req, res) {
+  try {
+    var id = parseInt(req.params.id);
+    var status = req.body.status;
+    if (!['reviewed','dismissed','pending'].includes(status)) return res.status(400).json({ error: 'حالة غير صالحة' });
+    await db.query('UPDATE reports SET status=$1 WHERE id=$2', [status, id]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// إرسال بلاغ (للمستخدم العادي)
+app.post('/api/users/:id/report', auth, async function(req, res) {
+  try {
+    var reportedId = parseInt(req.params.id);
+    var reporterId = req.user.id;
+    if (reportedId === reporterId) return res.status(400).json({ error: 'لا يمكنك الإبلاغ عن نفسك' });
+    var reason = req.body.reason || 'other';
+    var note = req.body.note || null;
+    // منع البلاغات المتكررة
+    var exists = await db.query(
+      'SELECT id FROM reports WHERE reporter_id=$1 AND reported_id=$2 AND status=$3',
+      [reporterId, reportedId, 'pending']
+    );
+    if (exists.rows.length) return res.status(409).json({ error: 'لديك بلاغ سابق قيد المراجعة' });
+    await db.query(
+      'INSERT INTO reports (reporter_id, reported_id, reason, note) VALUES ($1,$2,$3,$4)',
+      [reporterId, reportedId, reason, note]
+    );
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
